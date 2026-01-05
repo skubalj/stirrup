@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
         cfg.remove_config(&name);
     }
 
-    // cfg.write_to_file(&config_path)?;
+    cfg.write_to_file(&config_path)?;
 
     // Then, we can mount / unmount our devices
     for name in result.to_mount {

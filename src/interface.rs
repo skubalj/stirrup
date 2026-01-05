@@ -11,12 +11,18 @@ use std::collections::HashMap;
 
 use crate::mount::{self, ConfigFile, MountConfiguration};
 
+/// Describes the state of a currently running system
+enum RunState<T> {
+    Running,
+    Complete(T),
+    Abort,
+}
+
 #[derive(Default)]
 pub struct MountTui {
     state: TableState,
     table_rows: Vec<TableRow>,
     modal: Option<EditModal>,
-    exit: bool,
 }
 
 impl MountTui {
@@ -27,36 +33,23 @@ impl MountTui {
             state: Default::default(),
             table_rows: make_table_rows(&config, &mounted),
             modal: None,
-            exit: false,
         };
 
         // Run the UI loop
-        ratatui::run::<_, anyhow::Result<_>>(|terminal| {
-            while !tui.exit {
-                // Render
-                terminal.draw(|frame| {
-                    tui.draw(frame);
-                    if let Some(ref modal) = tui.modal {
-                        modal.draw(frame);
-                    }
-                })?;
-
-                // Handle input
-                if let Some(ref mut modal) = tui.modal {
-                    modal.handle_input()?;
-                    if modal.exit {
-                        tui.modal = None;
-                    }
-                } else {
-                    tui.handle_input()?;
+        let table_rows = ratatui::run::<_, anyhow::Result<_>>(|terminal| {
+            loop {
+                terminal.draw(|frame| tui.draw(frame))?;
+                match tui.handle_input()? {
+                    RunState::Running => {}
+                    RunState::Complete(()) => return Ok(tui.table_rows),
+                    RunState::Abort => return Ok(Vec::default()),
                 }
             }
-            Ok(())
         })?;
 
         // Unpack our rows into actions that the backend needs to perform
         let mut actions = TuiActions::default();
-        for row in tui.table_rows.into_iter() {
+        for row in table_rows.into_iter() {
             match row.add_remove {
                 AddRemove::Add => {
                     actions.to_create.insert(row.name.clone(), row.config);
@@ -75,18 +68,30 @@ impl MountTui {
         Ok(actions)
     }
 
-    fn handle_input(&mut self) -> Result<()> {
+    fn handle_input(&mut self) -> Result<RunState<()>> {
+        // Handle modals
+        if let Some(modal) = &mut self.modal {
+            match modal.handle_input()? {
+                RunState::Running => {}
+                RunState::Complete((idx, row)) => {
+                    self.table_rows[idx] = row;
+                    self.modal = None;
+                }
+                RunState::Abort => self.modal = None,
+            }
+
+            return Ok(RunState::Running);
+        }
+
+        // Main event loop handling
         if let Event::Key(key) = event::read()?
             && key.kind.is_press()
         {
             match key.code {
-                KeyCode::Esc => {
-                    self.exit = true;
-                    self.table_rows.clear();
-                }
-                KeyCode::Enter => self.exit = true,
-                KeyCode::Up => self.previous_row(),
-                KeyCode::Down => self.next_row(),
+                KeyCode::Esc => return Ok(RunState::Abort),
+                KeyCode::Enter => return Ok(RunState::Complete(())),
+                KeyCode::Up => self.state.select_previous(),
+                KeyCode::Down => self.state.select_next(),
                 KeyCode::Char(' ') => self.toggle_mounted(),
                 KeyCode::Char('-') | KeyCode::Delete => self.toggle_delete(),
                 KeyCode::Char('+') | KeyCode::Char('n') => self.add_record(),
@@ -95,26 +100,7 @@ impl MountTui {
             }
         }
 
-        Ok(())
-    }
-
-    fn next_row(&mut self) {
-        self.state.select(Some(
-            self.state
-                .selected()
-                .map(|x| (x + 1) % self.table_rows.len())
-                .unwrap_or_default(),
-        ));
-    }
-
-    fn previous_row(&mut self) {
-        let num_items = self.table_rows.len();
-        self.state.select(Some(
-            self.state
-                .selected()
-                .map(|x| (x + num_items - 1) % num_items)
-                .unwrap_or_default(),
-        ));
+        Ok(RunState::Running)
     }
 
     fn toggle_mounted(&mut self) {
@@ -165,6 +151,10 @@ impl MountTui {
             ).dark_gray(),
             layout[1],
         );
+
+        if let Some(modal) = &self.modal {
+            modal.draw(frame);
+        }
     }
 
     fn draw_table(&mut self, frame: &mut Frame, area: Rect) {
@@ -327,6 +317,7 @@ pub struct TuiActions {
     pub to_unmount: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
 struct EditModal {
     idx: usize,
     name: String,
@@ -339,7 +330,6 @@ struct EditModal {
     needs_mount: MountAction,
 
     selected: usize,
-    pub exit: bool,
 }
 
 impl EditModal {
@@ -356,11 +346,10 @@ impl EditModal {
             add_remove: row.add_remove,
             needs_mount: row.needs_mount,
             selected: 0,
-            exit: false,
         }
     }
 
-    pub fn result(self) -> (usize, TableRow) {
+    fn into_result(self) -> (usize, TableRow) {
         (
             self.idx,
             TableRow {
@@ -381,22 +370,20 @@ impl EditModal {
         )
     }
 
-    pub fn handle_input(&mut self) -> Result<()> {
+    pub fn handle_input(&mut self) -> Result<RunState<(usize, TableRow)>> {
         if let Event::Key(key) = event::read()?
             && key.kind.is_press()
         {
             match key.code {
-                KeyCode::Esc => self.exit = true,
-                KeyCode::Down => self.selected = (self.selected + 1) % Self::NUM_EDIT_FIELDS,
-                KeyCode::Up => {
-                    self.selected =
-                        (self.selected + Self::NUM_EDIT_FIELDS - 1) % Self::NUM_EDIT_FIELDS
-                }
+                KeyCode::Esc => return Ok(RunState::Abort),
+                KeyCode::Enter => return Ok(RunState::Complete(self.clone().into_result())),
+                KeyCode::Down => self.selected = (self.selected + 1).min(Self::NUM_EDIT_FIELDS - 1),
+                KeyCode::Up => self.selected = self.selected.saturating_sub(1),
                 _ => {}
             }
         }
 
-        Ok(())
+        Ok(RunState::Running)
     }
 
     pub fn draw(&self, frame: &mut Frame) {

@@ -55,8 +55,6 @@ pub struct MountConfiguration {
 impl MountConfiguration {
     /// Attempt to mount this configuration
     pub fn mount(&self) -> io::Result<()> {
-        // let mut args = vec!["mount"];
-
         let mut type_arg = Vec::new();
         if let Some(ref t) = self.filesystem {
             type_arg = vec!["-t", t];
@@ -77,18 +75,6 @@ impl MountConfiguration {
                 "mount command did not exit successfully",
             ))
         }
-
-        // let fs_type: FilesystemType = match self.filesystem {
-        //     Some(ref t) => FilesystemType::Manual(t),
-        //     None => FilesystemType::Auto(
-        //         &SupportedFilesystems::new().context("failed to query supported filesystems")?,
-        //     ),
-        // };
-
-        // Mount::builder()
-        //     .fstype(fs_type)
-        //     .mount(&self.device, &self.mount_point)
-        //     .context("failed to mount")?;
     }
 
     /// Attempt to unmount this configuration

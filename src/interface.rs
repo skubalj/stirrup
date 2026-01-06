@@ -5,9 +5,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Style, Stylize},
     text::{Line, Text},
-    widgets::{Block, Cell, Clear, Padding, Row, Table, TableState},
+    widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap},
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use tui_input::{Input, backend::crossterm::EventHandler};
 
 use crate::mount::{self, ConfigFile, MountConfiguration};
 
@@ -18,21 +19,30 @@ enum RunState<T> {
     Abort,
 }
 
+#[derive(Debug, Default)]
+enum Modal {
+    #[default]
+    None,
+    EditModal(EditModal),
+    DeleteConfirmModal(ConfirmModal),
+    Notification(NotifyModal),
+}
+
 #[derive(Default)]
 pub struct MountTui {
-    state: TableState,
+    table_state: TableState,
     table_rows: Vec<TableRow>,
-    modal: Option<EditModal>,
+    modal: Modal,
 }
 
 impl MountTui {
-    pub fn run(config: &ConfigFile) -> Result<TuiActions> {
+    pub fn run(config: &ConfigFile) -> Result<Option<TuiActions>> {
         let mounted = mount::probe_mtab()?;
 
         let mut tui = Self {
-            state: Default::default(),
+            table_state: Default::default(),
             table_rows: make_table_rows(&config, &mounted),
-            modal: None,
+            modal: Default::default(),
         };
 
         // Run the UI loop
@@ -41,59 +51,85 @@ impl MountTui {
                 terminal.draw(|frame| tui.draw(frame))?;
                 match tui.handle_input()? {
                     RunState::Running => {}
-                    RunState::Complete(()) => return Ok(tui.table_rows),
-                    RunState::Abort => return Ok(Vec::default()),
+                    RunState::Complete(()) => return Ok(Some(tui.table_rows)),
+                    RunState::Abort => return Ok(None),
                 }
             }
         })?;
 
-        // Unpack our rows into actions that the backend needs to perform
-        let mut actions = TuiActions::default();
-        for row in table_rows.into_iter() {
-            match row.add_remove {
-                AddRemove::Add => {
-                    actions.to_create.insert(row.name.clone(), row.config);
+        // Box our table rows up into the configuration format
+        if let Some(table_rows) = table_rows {
+            let mut actions = TuiActions::default();
+            for row in table_rows.into_iter() {
+                match row.needs_mount {
+                    MountAction::Mount => actions.to_mount.push(row.name.clone()),
+                    MountAction::Unmount => actions.to_unmount.push(row.name.clone()),
+                    MountAction::None => {}
                 }
-                AddRemove::Remove => actions.to_remove.push(row.name.clone()),
-                AddRemove::None => {}
+
+                actions.configurations.insert(row.name, row.config);
             }
 
-            match row.needs_mount {
-                MountAction::Mount => actions.to_mount.push(row.name),
-                MountAction::Unmount => actions.to_unmount.push(row.name),
-                MountAction::None => {}
-            }
+            Ok(Some(actions))
+        } else {
+            Ok(None)
         }
-
-        Ok(actions)
     }
 
     fn handle_input(&mut self) -> Result<RunState<()>> {
-        // Handle modals
-        if let Some(modal) = &mut self.modal {
-            match modal.handle_input()? {
+        match &mut self.modal {
+            Modal::None => return self.handle_main_input(),
+            Modal::EditModal(edit_modal) => match edit_modal.handle_input()? {
                 RunState::Running => {}
-                RunState::Complete((idx, row)) => {
-                    self.table_rows[idx] = row;
-                    self.modal = None;
-                }
-                RunState::Abort => self.modal = None,
-            }
+                RunState::Complete(row) => {
+                    self.table_rows[self.table_state.selected().unwrap()] = row;
+                    self.table_rows.sort_by(|a, b| a.name.cmp(&b.name));
 
-            return Ok(RunState::Running);
+                    self.modal = match self
+                        .table_rows
+                        .windows(2)
+                        .find(|window| window[0].name == window[1].name)
+                        .map(|x| x[0].name.as_str())
+                    {
+                        Some(x) => Modal::Notification(NotifyModal::new(
+                            "Error".into(),
+                            format!(
+                                "Configuration '{x}' is duplicated. Configuration names must be unique. If you save the configurations without fixing this, one variant may overwrite another"
+                            ),
+                        )),
+                        None => Modal::None,
+                    }
+                }
+                RunState::Abort => self.modal = Modal::None,
+            },
+            Modal::DeleteConfirmModal(confirm_modal) => match confirm_modal.handle_input()? {
+                RunState::Running => {}
+                RunState::Complete(true) => {
+                    self.table_rows.remove(self.table_state.selected().unwrap());
+                    self.modal = Modal::None;
+                }
+                RunState::Complete(false) | RunState::Abort => self.modal = Modal::None,
+            },
+            Modal::Notification(notification) => match notification.handle_input()? {
+                RunState::Running => {}
+                RunState::Complete(()) | RunState::Abort => self.modal = Modal::None,
+            },
         }
 
-        // Main event loop handling
+        Ok(RunState::Running)
+    }
+
+    fn handle_main_input(&mut self) -> Result<RunState<()>> {
         if let Event::Key(key) = event::read()?
             && key.kind.is_press()
         {
             match key.code {
                 KeyCode::Esc => return Ok(RunState::Abort),
                 KeyCode::Enter => return Ok(RunState::Complete(())),
-                KeyCode::Up => self.state.select_previous(),
-                KeyCode::Down => self.state.select_next(),
+                KeyCode::Up => self.table_state.select_previous(),
+                KeyCode::Down => self.table_state.select_next(),
                 KeyCode::Char(' ') => self.toggle_mounted(),
-                KeyCode::Char('-') | KeyCode::Delete => self.toggle_delete(),
+                KeyCode::Char('-') | KeyCode::Delete => self.open_delete_modal(),
                 KeyCode::Char('+') | KeyCode::Char('n') => self.add_record(),
                 KeyCode::Char('e') => self.edit_record(),
                 _ => {}
@@ -104,56 +140,56 @@ impl MountTui {
     }
 
     fn toggle_mounted(&mut self) {
-        if let Some(idx) = self.state.selected() {
+        if let Some(idx) = self.table_state.selected() {
             if let Some(row) = self.table_rows.get_mut(idx) {
                 row.toggle_mount();
             }
         }
     }
 
-    fn toggle_delete(&mut self) {
-        if let Some(idx) = self.state.selected() {
-            if let Some(row) = self.table_rows.get_mut(idx) {
-                match row.add_remove {
-                    AddRemove::None => row.add_remove = AddRemove::Remove,
-                    AddRemove::Add => {
-                        self.table_rows.remove(idx);
-                    }
-                    AddRemove::Remove => row.add_remove = AddRemove::None,
-                }
+    fn open_delete_modal(&mut self) {
+        if let Some(idx) = self.table_state.selected() {
+            if let Some(row) = self.table_rows.get(idx) {
+                self.modal = Modal::DeleteConfirmModal(ConfirmModal::new(format!(
+                    "Are you sure you want to delete '{}'?",
+                    row.name
+                )));
             }
         }
     }
 
     fn add_record(&mut self) {
-        let record = TableRow::new();
-        self.modal = Some(EditModal::new(self.table_rows.len(), &record));
-        self.table_rows.push(record);
+        self.table_rows.push(TableRow::new());
+        self.table_state.select(Some(self.table_rows.len() - 1));
+        self.modal = Modal::EditModal(EditModal::new(self.table_rows.last().unwrap()));
     }
 
     fn edit_record(&mut self) {
-        if let Some(idx) = self.state.selected() {
-            if let Some(row) = self.table_rows.get_mut(idx) {
-                self.modal = Some(EditModal::new(idx, row))
+        if let Some(idx) = self.table_state.selected() {
+            if let Some(row) = self.table_rows.get(idx) {
+                self.modal = Modal::EditModal(EditModal::new(row))
             }
         }
     }
 
     fn draw(&mut self, frame: &mut Frame) {
         let layout = Layout::default()
-            .constraints([Constraint::Fill(1), Constraint::Length(2)])
+            .constraints([Constraint::Fill(1), Constraint::Length(1)])
             .split(frame.area());
 
         self.draw_table(frame, layout[0]);
         frame.render_widget(
             Text::from(
-                "Mount/Unmount: SPACEBAR    Delete: DEL    New: N    Edit: E    Apply: ENTER    Discard: ESCAPE",
+                " Mount/Unmount: SPACEBAR    Delete: DEL    New: N    Edit: E    Apply: ENTER    Discard: ESCAPE",
             ).dark_gray(),
             layout[1],
         );
 
-        if let Some(modal) = &self.modal {
-            modal.draw(frame);
+        match &self.modal {
+            Modal::None => {}
+            Modal::EditModal(edit_modal) => edit_modal.draw(frame),
+            Modal::DeleteConfirmModal(confirm_modal) => confirm_modal.draw(frame),
+            Modal::Notification(notification) => notification.draw(frame),
         }
     }
 
@@ -165,21 +201,16 @@ impl MountTui {
             .map(|(idx, item)| {
                 let mut is_mounted =
                     display_boolean(item.is_mounted ^ item.needs_mount.changed()).to_owned();
-                if item.needs_mount.changed() {
-                    is_mounted += " (!)";
-                }
 
-                let (row_style, bullet) = match (item.add_remove, item.needs_mount) {
-                    (AddRemove::Add, _) => (Style::default().green(), '+'),
-                    (AddRemove::Remove, _) => (Style::default().red(), '-'),
-                    (_, MountAction::Mount | MountAction::Unmount) => {
-                        (Style::default().green(), '*')
-                    }
-                    _ => (Style::default(), ' '),
+                let row_style = if item.needs_mount.changed() {
+                    is_mounted += " *";
+                    Style::default().green()
+                } else {
+                    Style::default()
                 };
 
                 Row::from_iter(vec![
-                    Cell::from(format!(" {bullet} {:3}", idx + 1)).style(row_style),
+                    Cell::from(format!("{:3}", idx + 1)).style(row_style),
                     Cell::from(is_mounted).style(row_style),
                     Cell::from(item.name.as_str()).style(row_style),
                     Cell::from(item.config.device.as_str()).style(row_style),
@@ -201,7 +232,7 @@ impl MountTui {
         ]);
 
         let col_constraints = [
-            Constraint::Length(7),
+            Constraint::Length(4),
             Constraint::Length(9),
             Constraint::Fill(1),
             Constraint::Fill(1),
@@ -211,18 +242,14 @@ impl MountTui {
 
         let table = Table::new(table_rows, col_constraints)
             .header(header)
-            .row_highlight_style(
-                Style::default()
-                    .fg(ratatui::style::Color::White)
-                    .bg(ratatui::style::Color::Blue),
-            )
+            .row_highlight_style(Style::default().black().on_dark_gray())
             .block(
                 Block::bordered()
                     .padding(Padding::horizontal(1))
-                    .title(Line::from(" Select Mounts: ").bold()),
+                    .title(Line::from(" Select Mounts ").bold()),
             );
 
-        frame.render_stateful_widget(table, area, &mut self.state);
+        frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 }
 
@@ -230,15 +257,7 @@ fn display_boolean(b: bool) -> &'static str {
     if b { "Yes" } else { "No" }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-enum AddRemove {
-    #[default]
-    None,
-    Add,
-    Remove,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum MountAction {
     #[default]
     None,
@@ -260,7 +279,6 @@ struct TableRow {
     pub name: String,
     pub config: MountConfiguration,
     pub is_mounted: bool,
-    pub add_remove: AddRemove,
     pub needs_mount: MountAction,
 }
 
@@ -274,7 +292,6 @@ impl TableRow {
                 filesystem: Default::default(),
             },
             is_mounted: Default::default(),
-            add_remove: AddRemove::Add,
             needs_mount: Default::default(),
         }
     }
@@ -297,7 +314,6 @@ fn make_table_rows(config: &ConfigFile, mounted: &[MountConfiguration]) -> Vec<T
             is_mounted: mounted
                 .iter()
                 .any(|m| m.device == config.device && m.mount_point == config.mount_point),
-            add_remove: AddRemove::None,
             needs_mount: MountAction::None,
         });
     }
@@ -307,79 +323,151 @@ fn make_table_rows(config: &ConfigFile, mounted: &[MountConfiguration]) -> Vec<T
 /// The set of actions that were specified on the TUI
 #[derive(Debug, Default)]
 pub struct TuiActions {
-    /// The set of configurations that should be created
-    pub to_create: HashMap<String, MountConfiguration>,
-    /// The names of the configurations that should be deleted
-    pub to_remove: Vec<String>,
+    pub configurations: BTreeMap<String, MountConfiguration>,
     /// The names of configurations that need to be mounted
     pub to_mount: Vec<String>,
     /// The names of configurations that need to be unmounted
     pub to_unmount: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-struct EditModal {
-    idx: usize,
-    name: String,
-    device: String,
-    mount_point: String,
-    filesystem: String,
-
-    is_mounted: bool,
-    add_remove: AddRemove,
-    needs_mount: MountAction,
-
-    selected: usize,
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum EditSelection {
+    #[default]
+    Name,
+    Device,
+    MountPoint,
+    Filesystem,
+    AcceptButton,
+    DiscardButton,
 }
 
-impl EditModal {
-    const NUM_EDIT_FIELDS: usize = 4;
-
-    pub fn new(idx: usize, row: &TableRow) -> Self {
-        Self {
-            idx,
-            name: row.name.clone(),
-            device: row.config.device.clone(),
-            mount_point: row.config.mount_point.to_string_lossy().to_string(),
-            filesystem: row.config.filesystem.clone().unwrap_or_default(),
-            is_mounted: row.is_mounted,
-            add_remove: row.add_remove,
-            needs_mount: row.needs_mount,
-            selected: 0,
+impl EditSelection {
+    pub fn is_button(self) -> bool {
+        match self {
+            Self::AcceptButton | Self::DiscardButton => true,
+            _ => false,
         }
     }
 
-    fn into_result(self) -> (usize, TableRow) {
-        (
-            self.idx,
-            TableRow {
-                name: self.name,
-                config: MountConfiguration {
-                    device: self.device,
-                    mount_point: self.mount_point.into(),
-                    filesystem: if self.filesystem.is_empty() {
-                        None
-                    } else {
-                        Some(self.filesystem)
-                    },
-                },
-                is_mounted: self.is_mounted,
-                add_remove: self.add_remove,
-                needs_mount: self.needs_mount,
-            },
-        )
+    pub fn up(self) -> Self {
+        match self {
+            Self::Name | Self::Device => Self::Name,
+            Self::MountPoint => Self::Device,
+            Self::Filesystem => Self::MountPoint,
+            Self::AcceptButton | Self::DiscardButton => Self::Filesystem,
+        }
     }
 
-    pub fn handle_input(&mut self) -> Result<RunState<(usize, TableRow)>> {
-        if let Event::Key(key) = event::read()?
+    pub fn down(self) -> Self {
+        match self {
+            Self::Name => Self::Device,
+            Self::Device => Self::MountPoint,
+            Self::MountPoint => Self::Filesystem,
+            Self::Filesystem | Self::AcceptButton => Self::AcceptButton,
+            Self::DiscardButton => Self::DiscardButton,
+        }
+    }
+
+    pub fn left(self) -> Self {
+        match self {
+            Self::DiscardButton => Self::AcceptButton,
+            x => x,
+        }
+    }
+
+    pub fn right(self) -> Self {
+        match self {
+            Self::AcceptButton => Self::DiscardButton,
+            x => x,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Device,
+            Self::Device => Self::MountPoint,
+            Self::MountPoint => Self::Filesystem,
+            Self::Filesystem => Self::AcceptButton,
+            Self::AcceptButton | Self::DiscardButton => Self::DiscardButton,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Name | Self::Device => Self::Name,
+            Self::MountPoint => Self::Device,
+            Self::Filesystem => Self::MountPoint,
+            Self::AcceptButton => Self::Filesystem,
+            Self::DiscardButton => Self::AcceptButton,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EditModal {
+    name: Input,
+    device: Input,
+    mount_point: Input,
+    filesystem: Input,
+
+    is_mounted: bool,
+    needs_mount: MountAction,
+    selected: EditSelection,
+}
+
+impl EditModal {
+    pub fn new(row: &TableRow) -> Self {
+        Self {
+            name: Input::new(row.name.clone()),
+            device: Input::new(row.config.device.clone()),
+            mount_point: Input::new(row.config.mount_point.to_string_lossy().to_string()),
+            filesystem: Input::new(row.config.filesystem.clone().unwrap_or_default()),
+            is_mounted: row.is_mounted,
+            needs_mount: row.needs_mount,
+            selected: Default::default(),
+        }
+    }
+
+    pub fn handle_input(&mut self) -> Result<RunState<TableRow>> {
+        let event = event::read()?;
+        if let Event::Key(key) = event
             && key.kind.is_press()
         {
             match key.code {
                 KeyCode::Esc => return Ok(RunState::Abort),
-                KeyCode::Enter => return Ok(RunState::Complete(self.clone().into_result())),
-                KeyCode::Down => self.selected = (self.selected + 1).min(Self::NUM_EDIT_FIELDS - 1),
-                KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-                _ => {}
+                KeyCode::Enter => match self.selected {
+                    EditSelection::AcceptButton => {
+                        return Ok(RunState::Complete(self.clone().into()));
+                    }
+                    EditSelection::DiscardButton => return Ok(RunState::Abort),
+                    _ => {}
+                },
+                KeyCode::Up => self.selected = self.selected.up(),
+                KeyCode::Down => self.selected = self.selected.down(),
+                KeyCode::Left if self.selected.is_button() => {
+                    self.selected = self.selected.left();
+                }
+                KeyCode::Right if self.selected.is_button() => {
+                    self.selected = self.selected.right();
+                }
+                KeyCode::Tab => self.selected = self.selected.next(),
+                KeyCode::BackTab => self.selected = self.selected.previous(),
+
+                _ => match self.selected {
+                    EditSelection::Name => {
+                        self.name.handle_event(&event);
+                    }
+                    EditSelection::Device => {
+                        self.device.handle_event(&event);
+                    }
+                    EditSelection::MountPoint => {
+                        self.mount_point.handle_event(&event);
+                    }
+                    EditSelection::Filesystem => {
+                        self.filesystem.handle_event(&event);
+                    }
+                    _ => {}
+                },
             }
         }
 
@@ -394,7 +482,7 @@ impl EditModal {
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(Line::from(" Edit Mount Record: ").bold());
+            .title(Line::from(" Edit Mount Record ").bold());
         let field_areas: [Rect; 6] = border
             .inner(area)
             .layout(&Layout::default().constraints([Constraint::Length(1); 6]));
@@ -405,29 +493,207 @@ impl EditModal {
         let entry_layout = Layout::horizontal([Constraint::Length(13), Constraint::Fill(1)]);
 
         macro_rules! display_field {
-            ($idx:expr, $label:expr, $field:ident) => {{
+            ($idx:expr, $label:expr, $variant:expr, $field:ident) => {{
                 let [key_area, value_area] = field_areas[$idx].layout(&entry_layout);
                 frame.render_widget(Text::from($label).bold(), key_area);
 
-                let style = if self.selected == $idx {
-                    Style::default().on_blue()
+                let scroll = self.$field.visual_scroll(value_area.width as usize);
+
+                let style = if self.selected == $variant {
+                    let x = self.$field.visual_cursor().max(scroll) - scroll;
+                    frame.set_cursor_position((value_area.x + x as u16, value_area.y));
+                    Style::default().black().on_dark_gray().bold()
                 } else {
                     Style::default()
                 };
 
-                frame.render_widget(Text::from(self.$field.as_str()).style(style), value_area);
+                frame.render_widget(Text::from(self.$field.value()).style(style), value_area);
             }};
         }
 
-        display_field!(0, "Name:", name);
-        display_field!(1, "Device:", device);
-        display_field!(2, "Mount Point:", mount_point);
-        display_field!(3, "Filesystem:", filesystem);
+        display_field!(0, "Name:", EditSelection::Name, name);
+        display_field!(1, "Device:", EditSelection::Device, device);
+        display_field!(2, "Mount Point:", EditSelection::MountPoint, mount_point);
+        display_field!(3, "Filesystem:", EditSelection::Filesystem, filesystem);
 
         // Empty space
-        frame.render_widget(
-            Text::from("Accept: ENTER    Discard: ESCAPE").dark_gray(),
-            field_areas[5],
+
+        let button_areas: [Rect; 3] = field_areas[5].layout(
+            &Layout::horizontal([
+                Constraint::Length(8),
+                Constraint::Length(9),
+                Constraint::Fill(1),
+            ])
+            .spacing(2),
         );
+
+        frame.render_widget(
+            Text::from("[Accept]")
+                .style(button_style(self.selected == EditSelection::AcceptButton)),
+            button_areas[0],
+        );
+        frame.render_widget(
+            Text::from("[Discard]")
+                .style(button_style(self.selected == EditSelection::DiscardButton)),
+            button_areas[1],
+        );
+    }
+}
+
+impl From<EditModal> for TableRow {
+    fn from(value: EditModal) -> Self {
+        Self {
+            name: value.name.value().into(),
+            config: MountConfiguration {
+                device: value.device.value().into(),
+                mount_point: value.mount_point.value().into(),
+                filesystem: if value.filesystem.value().is_empty() {
+                    None
+                } else {
+                    Some(value.filesystem.value().into())
+                },
+            },
+            is_mounted: value.is_mounted,
+            needs_mount: value.needs_mount,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ConfirmModal {
+    text: String,
+    yes_selected: bool,
+}
+
+impl ConfirmModal {
+    pub fn new(text: String) -> Self {
+        Self {
+            text,
+            yes_selected: false,
+        }
+    }
+
+    pub fn handle_input(&mut self) -> Result<RunState<bool>> {
+        if let Event::Key(key) = event::read()?
+            && key.kind.is_press()
+        {
+            match key.code {
+                KeyCode::Esc => return Ok(RunState::Abort),
+                KeyCode::Enter => return Ok(RunState::Complete(self.yes_selected)),
+                KeyCode::Right => self.yes_selected = false,
+                KeyCode::Left => self.yes_selected = true,
+                _ => {}
+            }
+        }
+
+        Ok(RunState::Running)
+    }
+
+    pub fn draw(&self, frame: &mut Frame) {
+        let area = frame.area().centered(
+            Constraint::Percentage(30),
+            Constraint::Length(6), // top and bottom border + content
+        );
+
+        let border = Block::bordered()
+            .padding(Padding::horizontal(1))
+            .title(Line::from(" Confirm ").bold());
+
+        let field_areas: [Rect; 2] = border.inner(area).layout(
+            &Layout::default()
+                .constraints([Constraint::Fill(1), Constraint::Length(1)])
+                .spacing(1),
+        );
+
+        frame.render_widget(Clear, area); // Clear space
+        frame.render_widget(border, area); // Draw the border of our modal
+
+        frame.render_widget(
+            Paragraph::new(self.text.as_str()).wrap(Wrap { trim: true }),
+            field_areas[0],
+        );
+
+        let button_layout: [Rect; 3] = field_areas[1].layout(
+            &Layout::horizontal([
+                Constraint::Length(5),
+                Constraint::Length(4),
+                Constraint::Fill(1),
+            ])
+            .spacing(2),
+        );
+
+        frame.render_widget(
+            Text::from("[Yes]").style(button_style(self.yes_selected)),
+            button_layout[0],
+        );
+        frame.render_widget(
+            Text::from("[No]").style(button_style(!self.yes_selected)),
+            button_layout[1],
+        );
+    }
+}
+
+fn button_style(selected: bool) -> Style {
+    if selected {
+        Style::default().bold().black().on_dark_gray()
+    } else {
+        Style::default().bold().dark_gray()
+    }
+}
+
+#[derive(Debug)]
+struct NotifyModal {
+    title: String,
+    text: String,
+}
+
+impl NotifyModal {
+    pub fn new(title: String, text: String) -> Self {
+        Self { title, text }
+    }
+
+    pub fn handle_input(&mut self) -> Result<RunState<()>> {
+        if let Event::Key(key) = event::read()?
+            && key.kind.is_press()
+        {
+            match key.code {
+                KeyCode::Esc => return Ok(RunState::Abort),
+                KeyCode::Enter => return Ok(RunState::Complete(())),
+                _ => {}
+            }
+        }
+
+        Ok(RunState::Running)
+    }
+
+    pub fn draw(&self, frame: &mut Frame) {
+        let area = frame.area().centered(
+            Constraint::Percentage(30),
+            Constraint::Length(8), // top and bottom border + content
+        );
+
+        let border = Block::bordered()
+            .padding(Padding::horizontal(1))
+            .title(Line::from(format!(" {} ", self.title)))
+            .bold();
+
+        let field_areas: [Rect; 2] = border
+            .inner(area)
+            .layout(&Layout::default().constraints([Constraint::Fill(1), Constraint::Length(1)]));
+
+        frame.render_widget(Clear, area); // Clear space
+        frame.render_widget(border, area); // Draw the border of our modal
+        frame.render_widget(
+            Paragraph::new(self.text.as_str())
+                .wrap(Wrap { trim: true })
+                .style(Style::default()),
+            field_areas[0],
+        );
+
+        let button_area: [Rect; 2] = field_areas[1].layout(&Layout::horizontal([
+            Constraint::Length(4),
+            Constraint::Fill(1),
+        ]));
+        frame.render_widget(Text::from("[OK]").on_dark_gray(), button_area[0]);
     }
 }

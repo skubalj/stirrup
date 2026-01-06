@@ -13,6 +13,10 @@ pub struct ConfigFile {
 }
 
 impl ConfigFile {
+    pub fn new(mounts: BTreeMap<String, MountConfiguration>) -> Self {
+        Self { mounts }
+    }
+
     pub fn read_from_file(p: &Path) -> anyhow::Result<ConfigFile> {
         let data = match fs::read(p) {
             Ok(x) => x,
@@ -30,14 +34,6 @@ impl ConfigFile {
 
     pub fn get_config(&self, name: &str) -> Option<&MountConfiguration> {
         self.mounts.get(name)
-    }
-
-    pub fn add_config(&mut self, name: String, config: MountConfiguration) {
-        self.mounts.insert(name, config);
-    }
-
-    pub fn remove_config(&mut self, name: &str) {
-        self.mounts.remove(name);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &MountConfiguration)> {

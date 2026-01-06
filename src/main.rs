@@ -11,37 +11,32 @@ fn main() -> anyhow::Result<()> {
     let config_path = config_file_path();
     let mut cfg = ConfigFile::read_from_file(&config_path)?;
 
-    let result = MountTui::run(&cfg)?;
+    if let Some(result) = MountTui::run(&cfg)? {
+        // First, update the config file
+        cfg = ConfigFile::new(result.configurations);
+        cfg.write_to_file(&config_path)?;
 
-    // First, we'll update the config file
-    for (name, config) in result.to_create {
-        cfg.add_config(name, config);
-    }
-    for name in result.to_remove {
-        cfg.remove_config(&name);
-    }
-
-    cfg.write_to_file(&config_path)?;
-
-    // Then, we can mount / unmount our devices
-    for name in result.to_mount {
-        match cfg.get_config(&name) {
-            Some(x) => {
-                eprintln!("Mounting {name} to {}", x.mount_point.to_string_lossy());
-                x.mount()
-                    .with_context(|| format!("failed to mount {name}"))?
+        // Then, we can mount / unmount our devices
+        for name in result.to_mount {
+            match cfg.get_config(&name) {
+                Some(x) => {
+                    eprintln!("Mounting {name} to {}", x.mount_point.to_string_lossy());
+                    x.mount()
+                        .with_context(|| format!("failed to mount {name}"))?
+                }
+                None => eprintln!("Unable to find configuration with name '{name}'"),
             }
-            None => eprintln!("Unable to find configuration with name '{name}'"),
         }
-    }
-    for name in result.to_unmount {
-        match cfg.get_config(&name) {
-            Some(x) => {
-                eprintln!("Unmounting {name} from {}", x.mount_point.to_string_lossy());
-                x.unmount()
-                    .with_context(|| format!("failed to unmount {name}"))?
+
+        for name in result.to_unmount {
+            match cfg.get_config(&name) {
+                Some(x) => {
+                    eprintln!("Unmounting {name} from {}", x.mount_point.to_string_lossy());
+                    x.unmount()
+                        .with_context(|| format!("failed to unmount {name}"))?
+                }
+                None => eprintln!("Unable to find configuration with name '{name}'"),
             }
-            None => eprintln!("Unable to find configuration with name '{name}'"),
         }
     }
 

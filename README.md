@@ -1,4 +1,4 @@
-# Stirrup: A Terminal Based Filesystem Mount Manager 🐴
+# Stirrup 🐴: A TUI Filesystem Mount Manager
 
 _When you need to mount up, put your foot in the stirrup_
 

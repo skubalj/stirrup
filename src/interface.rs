@@ -16,13 +16,12 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Constraint, Layout, Position, Rect},
-    style::{Style, Stylize},
     text::{Line, Text},
     widgets::{
         Block, Cell, Clear, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation,
@@ -50,7 +49,7 @@ pub struct MountTui {
 
 impl MountTui {
     pub fn run(config: &ConfigFile) -> Result<Option<TuiActions>> {
-        let mounted = mount::probe_mtab()?;
+        let mounted = mount::probe_mtab().context("failed to probe /etc/mtab")?;
 
         let mut tui = Self {
             table_state: Default::default(),
@@ -219,7 +218,7 @@ GNU General Public License for more details.",
         frame.render_widget(
             Text::from(
                 " Mount/Unmount: SPACEBAR    Delete: DEL    New: N    Edit: E    Program Info: I    Apply: ENTER    Discard: ESCAPE",
-            ).dark_gray(),
+            ).style(style::help_text()),
             layout[1],
         );
 
@@ -238,9 +237,9 @@ GNU General Public License for more details.",
 
                 let row_style = if item.needs_mount.changed() {
                     is_mounted += " *";
-                    Style::default().green()
+                    style::table_selected_row()
                 } else {
-                    Style::default()
+                    style::default_text()
                 };
 
                 Row::from_iter(vec![
@@ -255,14 +254,13 @@ GNU General Public License for more details.",
             })
             .collect();
 
-        let header_format = Style::default().bold().blue();
         let header = Row::from_iter([
-            Cell::from("").style(header_format),
-            Cell::from("Mounted:").style(header_format),
-            Cell::from("Name:").style(header_format),
-            Cell::from("Device:").style(header_format),
-            Cell::from("Mount Point:").style(header_format),
-            Cell::from("Filesystem:").style(header_format),
+            Cell::from("").style(style::header_text()),
+            Cell::from("Mounted:").style(style::header_text()),
+            Cell::from("Name:").style(style::header_text()),
+            Cell::from("Device:").style(style::header_text()),
+            Cell::from("Mount Point:").style(style::header_text()),
+            Cell::from("Filesystem:").style(style::header_text()),
         ]);
 
         let col_constraints = [
@@ -276,11 +274,11 @@ GNU General Public License for more details.",
 
         let table = Table::new(table_rows, col_constraints)
             .header(header)
-            .row_highlight_style(Style::default().black().on_dark_gray())
+            .row_highlight_style(style::highlight_text())
             .block(
                 Block::bordered()
                     .padding(Padding::horizontal(1))
-                    .title(Line::from(" Select Mounts ").bold().blue()),
+                    .title(Line::from(" Select Mounts ").style(style::header_text())),
             );
 
         frame.render_stateful_widget(table, area, &mut self.table_state);
@@ -554,7 +552,7 @@ impl EditModal {
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(Line::from(" Edit Mount Record ").bold().blue());
+            .title(Line::from(" Edit Mount Record ").style(style::header_text()));
         let field_areas: [Rect; 6] = border
             .inner(area)
             .layout(&Layout::default().constraints([Constraint::Length(1); 6]));
@@ -568,7 +566,9 @@ impl EditModal {
         macro_rules! display_field {
             ($idx:expr, $label:expr, $variant:expr, $field:ident) => {{
                 let [key_area, value_area] = field_areas[$idx].layout(&entry_layout);
-                Text::from($label).bold().blue().render(key_area, buf);
+                Text::from($label)
+                    .style(style::header_text())
+                    .render(key_area, buf);
 
                 let scroll = self.$field.visual_scroll(value_area.width as usize);
                 let style = if self.selected == $variant {
@@ -577,11 +577,11 @@ impl EditModal {
                         x: value_area.x + x as u16,
                         y: value_area.y,
                     });
-                    Style::default().black().on_dark_gray().bold()
+                    style::highlight_text()
                 } else if self.is_mounted && $variant != EditSelection::Name {
-                    Style::default().dark_gray()
+                    style::disabled_text()
                 } else {
-                    Style::default()
+                    style::default_text()
                 };
 
                 Text::from(self.$field.value())
@@ -605,10 +605,14 @@ impl EditModal {
         );
 
         Text::from("[Accept]")
-            .style(button_style(self.selected == EditSelection::AcceptButton))
+            .style(style::button_style(
+                self.selected == EditSelection::AcceptButton,
+            ))
             .render(button_areas[0], buf);
         Text::from("[Discard]")
-            .style(button_style(self.selected == EditSelection::DiscardButton))
+            .style(style::button_style(
+                self.selected == EditSelection::DiscardButton,
+            ))
             .render(button_areas[1], buf);
     }
 }
@@ -670,7 +674,7 @@ impl ConfirmModal {
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(Line::from(" Confirm ").bold().blue());
+            .title(Line::from(" Confirm ").style(style::header_text()));
 
         let field_areas: [Rect; 2] = border.inner(area).layout(
             &Layout::default()
@@ -695,19 +699,11 @@ impl ConfirmModal {
         );
 
         Text::from("[Yes]")
-            .style(button_style(self.yes_selected))
+            .style(style::button_style(self.yes_selected))
             .render(button_layout[0], buf);
         Text::from("[No]")
-            .style(button_style(!self.yes_selected))
+            .style(style::button_style(!self.yes_selected))
             .render(button_layout[1], buf);
-    }
-}
-
-fn button_style(selected: bool) -> Style {
-    if selected {
-        Style::default().bold().black().on_dark_gray()
-    } else {
-        Style::default().bold().dark_gray()
     }
 }
 
@@ -754,7 +750,7 @@ impl NotifyModal {
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(Line::from(format!(" {} ", self.title)).bold().blue());
+            .title(Line::from(format!(" {} ", self.title)).style(style::header_text()));
 
         let field_areas: [Rect; 2] = border
             .inner(area)
@@ -763,7 +759,7 @@ impl NotifyModal {
         Clear.render(area, buf); // Clear space
         border.render(area, buf); // Draw the border of our modal
         Paragraph::new(self.text.as_str())
-            .style(Style::default().not_bold())
+            .style(style::default_text())
             .scroll((self.scroll_state.get_position() as u16, 0))
             .render(field_areas[0], buf);
 
@@ -775,7 +771,52 @@ impl NotifyModal {
             .layout(&Layout::horizontal([Constraint::Length(4), Constraint::Fill(1)]).spacing(1));
 
         Text::from("[OK]")
-            .style(button_style(true))
+            .style(style::button_selected_text())
             .render(button_area[0], buf);
+    }
+}
+
+/// Definitions of all the styles so that things stay consistent
+mod style {
+    use ratatui::style::Style;
+
+    pub const fn default_text() -> Style {
+        Style::new()
+    }
+
+    pub const fn disabled_text() -> Style {
+        default_text().dark_gray()
+    }
+
+    pub const fn header_text() -> Style {
+        default_text().blue().bold()
+    }
+
+    pub const fn table_selected_row() -> Style {
+        default_text().green()
+    }
+
+    pub const fn highlight_text() -> Style {
+        default_text().black().on_dark_gray().bold()
+    }
+
+    pub const fn button_style(selected: bool) -> Style {
+        if selected {
+            button_selected_text()
+        } else {
+            button_text()
+        }
+    }
+
+    pub const fn button_text() -> Style {
+        default_text().bold().dark_gray()
+    }
+
+    pub const fn button_selected_text() -> Style {
+        default_text().black().on_dark_gray().bold()
+    }
+
+    pub const fn help_text() -> Style {
+        default_text().dark_gray()
     }
 }

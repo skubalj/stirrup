@@ -1,7 +1,16 @@
 [package]
-name = "saddleup"
+name = "stirrup"
 version = "0.1.0"
 edition = "2024"
+authors = ["Joseph Skubal"]
+license = "GPL-3.0-or-later"
+readme = "README.md"
+repository = "https://github.com/skubalj/stirrup"
+description = "Interactive terminal filesystem mount manager"
+
+[profile.release]
+lto = true
+strip = true
 
 [dependencies]
 anyhow = "1.0.100"

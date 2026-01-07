@@ -1,5 +1,5 @@
 /*
-saddle-up: A TUI Mount Manager
+stirrup: A TUI Mount Manager
 Copyright (C) 2026 Joseph Skubal
 
 This program is free software: you can redistribute it and/or modify
@@ -54,7 +54,7 @@ impl MountTui {
 
         let mut tui = Self {
             table_state: Default::default(),
-            table_rows: make_table_rows(&config, &mounted),
+            table_rows: make_table_rows(config, &mounted),
             modal: Default::default(),
         };
 
@@ -157,28 +157,30 @@ without fixing this, one variant may overwrite another"
     }
 
     fn toggle_mounted(&mut self) {
-        if let Some(idx) = self.table_state.selected() {
-            if let Some(row) = self.table_rows.get_mut(idx) {
-                row.toggle_mount();
-            }
+        if let Some(idx) = self.table_state.selected()
+            && let Some(row) = self.table_rows.get_mut(idx)
+        {
+            row.toggle_mount();
         }
     }
 
     fn open_delete_modal(&mut self) {
-        if let Some(idx) = self.table_state.selected() {
-            if let Some(row) = self.table_rows.get(idx) {
-                self.modal = ModalState::DeleteConfirmModal(ConfirmModal::new(format!(
-                    "Are you sure you want to delete '{}'?",
-                    row.name
-                )));
-            }
+        if let Some(idx) = self.table_state.selected()
+            && let Some(row) = self.table_rows.get(idx)
+        {
+            self.modal = ModalState::DeleteConfirmModal(ConfirmModal::new(format!(
+                "Are you sure you want to delete '{}'?",
+                row.name
+            )));
         }
     }
 
     fn open_info_modal(&mut self) {
         self.modal = ModalState::Notification(NotifyModal::new(
-            "Saddle Up 🐴",
-            "A TUI Mount Manager
+            "Stirrup 🐴",
+            "Stirrup: A TUI Mount Manager
+
+When you need to mount up, put your foot in the stirrup
             
 Copyright (C) 2026 Joseph Skubal
 
@@ -201,10 +203,10 @@ GNU General Public License for more details.",
     }
 
     fn edit_record(&mut self) {
-        if let Some(idx) = self.table_state.selected() {
-            if let Some(row) = self.table_rows.get(idx) {
-                self.modal = ModalState::EditModal(EditModal::new(row))
-            }
+        if let Some(idx) = self.table_state.selected()
+            && let Some(row) = self.table_rows.get(idx)
+        {
+            self.modal = ModalState::EditModal(EditModal::new(row))
         }
     }
 
@@ -253,7 +255,7 @@ GNU General Public License for more details.",
             })
             .collect();
 
-        let header_format = Style::default().bold();
+        let header_format = Style::default().bold().blue();
         let header = Row::from_iter([
             Cell::from("").style(header_format),
             Cell::from("Mounted:").style(header_format),
@@ -278,7 +280,7 @@ GNU General Public License for more details.",
             .block(
                 Block::bordered()
                     .padding(Padding::horizontal(1))
-                    .title(Line::from(" Select Mounts ").bold()),
+                    .title(Line::from(" Select Mounts ").bold().blue()),
             );
 
         frame.render_stateful_widget(table, area, &mut self.table_state);
@@ -373,13 +375,10 @@ enum ModalState {
 
 impl ModalState {
     pub fn set_cursor_position(&self, frame: &mut Frame) {
-        match self {
-            ModalState::EditModal(edit_modal) => {
-                if let Some(position) = edit_modal.cursor {
-                    frame.set_cursor_position(position);
-                }
-            }
-            _ => {}
+        if let ModalState::EditModal(edit_modal) = self
+            && let Some(position) = edit_modal.cursor
+        {
+            frame.set_cursor_position(position);
         }
     }
 }
@@ -413,23 +412,22 @@ enum EditSelection {
 
 impl EditSelection {
     pub fn is_button(self) -> bool {
-        match self {
-            Self::AcceptButton | Self::DiscardButton => true,
-            _ => false,
-        }
+        matches!(self, Self::AcceptButton | Self::DiscardButton)
     }
 
-    pub fn up(self) -> Self {
+    pub fn up(self, is_mounted: bool) -> Self {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
             Self::Filesystem => Self::MountPoint,
+            Self::AcceptButton | Self::DiscardButton if is_mounted => Self::Name,
             Self::AcceptButton | Self::DiscardButton => Self::Filesystem,
         }
     }
 
-    pub fn down(self) -> Self {
+    pub fn down(self, is_mounted: bool) -> Self {
         match self {
+            Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
             Self::MountPoint => Self::Filesystem,
@@ -452,8 +450,9 @@ impl EditSelection {
         }
     }
 
-    pub fn next(self) -> Self {
+    pub fn next(self, is_mounted: bool) -> Self {
         match self {
+            Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
             Self::MountPoint => Self::Filesystem,
@@ -462,11 +461,12 @@ impl EditSelection {
         }
     }
 
-    pub fn previous(self) -> Self {
+    pub fn previous(self, is_mounted: bool) -> Self {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
             Self::Filesystem => Self::MountPoint,
+            Self::AcceptButton if is_mounted => Self::Name,
             Self::AcceptButton => Self::Filesystem,
             Self::DiscardButton => Self::AcceptButton,
         }
@@ -514,16 +514,16 @@ impl EditModal {
                     EditSelection::DiscardButton => return Ok(RunState::Abort),
                     _ => {}
                 },
-                KeyCode::Up => self.selected = self.selected.up(),
-                KeyCode::Down => self.selected = self.selected.down(),
+                KeyCode::Up => self.selected = self.selected.up(self.is_mounted),
+                KeyCode::Down => self.selected = self.selected.down(self.is_mounted),
                 KeyCode::Left if self.selected.is_button() => {
                     self.selected = self.selected.left();
                 }
                 KeyCode::Right if self.selected.is_button() => {
                     self.selected = self.selected.right();
                 }
-                KeyCode::Tab => self.selected = self.selected.next(),
-                KeyCode::BackTab => self.selected = self.selected.previous(),
+                KeyCode::Tab => self.selected = self.selected.next(self.is_mounted),
+                KeyCode::BackTab => self.selected = self.selected.previous(self.is_mounted),
 
                 _ => match self.selected {
                     EditSelection::Name => {
@@ -554,7 +554,7 @@ impl EditModal {
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(Line::from(" Edit Mount Record ").bold());
+            .title(Line::from(" Edit Mount Record ").bold().blue());
         let field_areas: [Rect; 6] = border
             .inner(area)
             .layout(&Layout::default().constraints([Constraint::Length(1); 6]));
@@ -568,10 +568,9 @@ impl EditModal {
         macro_rules! display_field {
             ($idx:expr, $label:expr, $variant:expr, $field:ident) => {{
                 let [key_area, value_area] = field_areas[$idx].layout(&entry_layout);
-                Text::from($label).bold().render(key_area, buf);
+                Text::from($label).bold().blue().render(key_area, buf);
 
                 let scroll = self.$field.visual_scroll(value_area.width as usize);
-
                 let style = if self.selected == $variant {
                     let x = self.$field.visual_cursor().max(scroll) - scroll;
                     self.cursor = Some(Position {
@@ -579,6 +578,8 @@ impl EditModal {
                         y: value_area.y,
                     });
                     Style::default().black().on_dark_gray().bold()
+                } else if self.is_mounted && $variant != EditSelection::Name {
+                    Style::default().dark_gray()
                 } else {
                     Style::default()
                 };
@@ -593,8 +594,6 @@ impl EditModal {
         display_field!(1, "Device:", EditSelection::Device, device);
         display_field!(2, "Mount Point:", EditSelection::MountPoint, mount_point);
         display_field!(3, "Filesystem:", EditSelection::Filesystem, filesystem);
-
-        // Empty space
 
         let button_areas: [Rect; 3] = field_areas[5].layout(
             &Layout::horizontal([
@@ -671,7 +670,7 @@ impl ConfirmModal {
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(Line::from(" Confirm ").bold());
+            .title(Line::from(" Confirm ").bold().blue());
 
         let field_areas: [Rect; 2] = border.inner(area).layout(
             &Layout::default()
@@ -749,14 +748,13 @@ impl NotifyModal {
 
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         let area = area.centered(
-            Constraint::Length(74),     // 70 character lines + padding and border
+            Constraint::Length(75), // 70 character lines + padding, border, and scroll bar
             Constraint::Percentage(50), // top and bottom border + content
         );
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(Line::from(format!(" {} ", self.title)))
-            .bold();
+            .title(Line::from(format!(" {} ", self.title)).bold().blue());
 
         let field_areas: [Rect; 2] = border
             .inner(area)
@@ -765,7 +763,7 @@ impl NotifyModal {
         Clear.render(area, buf); // Clear space
         border.render(area, buf); // Draw the border of our modal
         Paragraph::new(self.text.as_str())
-            .style(Style::default())
+            .style(Style::default().not_bold())
             .scroll((self.scroll_state.get_position() as u16, 0))
             .render(field_areas[0], buf);
 
@@ -777,7 +775,7 @@ impl NotifyModal {
             .layout(&Layout::horizontal([Constraint::Length(4), Constraint::Fill(1)]).spacing(1));
 
         Text::from("[OK]")
-            .on_dark_gray()
+            .style(button_style(true))
             .render(button_area[0], buf);
     }
 }

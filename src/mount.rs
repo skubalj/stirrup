@@ -1,5 +1,5 @@
 /*
-saddle-up: A TUI Mount Manager
+stirrup: A TUI Mount Manager
 Copyright (C) 2026 Joseph Skubal
 
 This program is free software: you can redistribute it and/or modify
@@ -84,10 +84,7 @@ impl MountConfiguration {
         if status.success() {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "mount command did not exit successfully",
-            ))
+            Err(io::Error::other("mount command did not exit successfully"))
         }
     }
 
@@ -101,10 +98,7 @@ impl MountConfiguration {
         if status.success() {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "umount command did not exit successfully",
-            ))
+            Err(io::Error::other("umount command did not exit successfully"))
         }
     }
 }

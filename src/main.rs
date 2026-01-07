@@ -1,5 +1,5 @@
 /*
-saddle-up: A TUI Mount Manager
+stirrup: A TUI Mount Manager
 Copyright (C) 2026 Joseph Skubal
 
 This program is free software: you can redistribute it and/or modify
@@ -28,7 +28,7 @@ mod mount;
 fn main() -> anyhow::Result<()> {
     let config_path = config_file_path();
     if let Some(p) = config_path.parent() {
-        fs::create_dir_all(&p)?;
+        fs::create_dir_all(p)?;
     }
 
     let mut cfg = ConfigFile::read_from_file(&config_path)?;

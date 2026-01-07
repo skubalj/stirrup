@@ -1,11 +1,33 @@
+/*
+saddle-up: A TUI Mount Manager
+Copyright (C) 2026 Joseph Skubal
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    buffer::Buffer,
+    layout::{Constraint, Layout, Position, Rect},
     style::{Style, Stylize},
     text::{Line, Text},
-    widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{
+        Block, Cell, Clear, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, StatefulWidget, Table, TableState, Widget, Wrap,
+    },
 };
 use std::collections::BTreeMap;
 use tui_input::{Input, backend::crossterm::EventHandler};
@@ -19,20 +41,11 @@ enum RunState<T> {
     Abort,
 }
 
-#[derive(Debug, Default)]
-enum Modal {
-    #[default]
-    None,
-    EditModal(EditModal),
-    DeleteConfirmModal(ConfirmModal),
-    Notification(NotifyModal),
-}
-
 #[derive(Default)]
 pub struct MountTui {
     table_state: TableState,
     table_rows: Vec<TableRow>,
-    modal: Modal,
+    modal: ModalState,
 }
 
 impl MountTui {
@@ -78,8 +91,8 @@ impl MountTui {
 
     fn handle_input(&mut self) -> Result<RunState<()>> {
         match &mut self.modal {
-            Modal::None => return self.handle_main_input(),
-            Modal::EditModal(edit_modal) => match edit_modal.handle_input()? {
+            ModalState::None => return self.handle_main_input(),
+            ModalState::EditModal(edit_modal) => match edit_modal.handle_input()? {
                 RunState::Running => {}
                 RunState::Complete(row) => {
                     self.table_rows[self.table_state.selected().unwrap()] = row;
@@ -91,28 +104,31 @@ impl MountTui {
                         .find(|window| window[0].name == window[1].name)
                         .map(|x| x[0].name.as_str())
                     {
-                        Some(x) => Modal::Notification(NotifyModal::new(
-                            "Error".into(),
+                        Some(x) => ModalState::Notification(NotifyModal::new(
+                            "Error",
                             format!(
-                                "Configuration '{x}' is duplicated. Configuration names must be unique. If you save the configurations without fixing this, one variant may overwrite another"
+                                "Configuration '{x}' is duplicated.
+
+Configuration names must be unique. If you save the configurations
+without fixing this, one variant may overwrite another"
                             ),
                         )),
-                        None => Modal::None,
+                        None => ModalState::None,
                     }
                 }
-                RunState::Abort => self.modal = Modal::None,
+                RunState::Abort => self.modal = ModalState::None,
             },
-            Modal::DeleteConfirmModal(confirm_modal) => match confirm_modal.handle_input()? {
+            ModalState::DeleteConfirmModal(confirm_modal) => match confirm_modal.handle_input()? {
                 RunState::Running => {}
                 RunState::Complete(true) => {
                     self.table_rows.remove(self.table_state.selected().unwrap());
-                    self.modal = Modal::None;
+                    self.modal = ModalState::None;
                 }
-                RunState::Complete(false) | RunState::Abort => self.modal = Modal::None,
+                RunState::Complete(false) | RunState::Abort => self.modal = ModalState::None,
             },
-            Modal::Notification(notification) => match notification.handle_input()? {
+            ModalState::Notification(notification) => match notification.handle_input()? {
                 RunState::Running => {}
-                RunState::Complete(()) | RunState::Abort => self.modal = Modal::None,
+                RunState::Complete(()) | RunState::Abort => self.modal = ModalState::None,
             },
         }
 
@@ -132,6 +148,7 @@ impl MountTui {
                 KeyCode::Char('-') | KeyCode::Delete => self.open_delete_modal(),
                 KeyCode::Char('+') | KeyCode::Char('n') => self.add_record(),
                 KeyCode::Char('e') => self.edit_record(),
+                KeyCode::Char('i') => self.open_info_modal(),
                 _ => {}
             }
         }
@@ -150,7 +167,7 @@ impl MountTui {
     fn open_delete_modal(&mut self) {
         if let Some(idx) = self.table_state.selected() {
             if let Some(row) = self.table_rows.get(idx) {
-                self.modal = Modal::DeleteConfirmModal(ConfirmModal::new(format!(
+                self.modal = ModalState::DeleteConfirmModal(ConfirmModal::new(format!(
                     "Are you sure you want to delete '{}'?",
                     row.name
                 )));
@@ -158,16 +175,35 @@ impl MountTui {
         }
     }
 
+    fn open_info_modal(&mut self) {
+        self.modal = ModalState::Notification(NotifyModal::new(
+            "Saddle Up 🐴",
+            "A TUI Mount Manager
+            
+Copyright (C) 2026 Joseph Skubal
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.",
+        ))
+    }
+
     fn add_record(&mut self) {
         self.table_rows.push(TableRow::new());
         self.table_state.select(Some(self.table_rows.len() - 1));
-        self.modal = Modal::EditModal(EditModal::new(self.table_rows.last().unwrap()));
+        self.modal = ModalState::EditModal(EditModal::new(self.table_rows.last().unwrap()));
     }
 
     fn edit_record(&mut self) {
         if let Some(idx) = self.table_state.selected() {
             if let Some(row) = self.table_rows.get(idx) {
-                self.modal = Modal::EditModal(EditModal::new(row))
+                self.modal = ModalState::EditModal(EditModal::new(row))
             }
         }
     }
@@ -180,17 +216,13 @@ impl MountTui {
         self.draw_table(frame, layout[0]);
         frame.render_widget(
             Text::from(
-                " Mount/Unmount: SPACEBAR    Delete: DEL    New: N    Edit: E    Apply: ENTER    Discard: ESCAPE",
+                " Mount/Unmount: SPACEBAR    Delete: DEL    New: N    Edit: E    Program Info: I    Apply: ENTER    Discard: ESCAPE",
             ).dark_gray(),
             layout[1],
         );
 
-        match &self.modal {
-            Modal::None => {}
-            Modal::EditModal(edit_modal) => edit_modal.draw(frame),
-            Modal::DeleteConfirmModal(confirm_modal) => confirm_modal.draw(frame),
-            Modal::Notification(notification) => notification.draw(frame),
-        }
+        frame.render_stateful_widget(Modal, layout[0], &mut self.modal);
+        self.modal.set_cursor_position(frame);
     }
 
     fn draw_table(&mut self, frame: &mut Frame, area: Rect) {
@@ -330,6 +362,44 @@ pub struct TuiActions {
     pub to_unmount: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+enum ModalState {
+    #[default]
+    None,
+    EditModal(EditModal),
+    DeleteConfirmModal(ConfirmModal),
+    Notification(NotifyModal),
+}
+
+impl ModalState {
+    pub fn set_cursor_position(&self, frame: &mut Frame) {
+        match self {
+            ModalState::EditModal(edit_modal) => {
+                if let Some(position) = edit_modal.cursor {
+                    frame.set_cursor_position(position);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct Modal;
+
+impl StatefulWidget for Modal {
+    type State = ModalState;
+
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        match state {
+            ModalState::None => {}
+            ModalState::EditModal(edit_modal) => edit_modal.draw(area, buf),
+            ModalState::DeleteConfirmModal(confirm_modal) => confirm_modal.draw(area, buf),
+            ModalState::Notification(notify_modal) => notify_modal.draw(area, buf),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum EditSelection {
     #[default]
@@ -413,6 +483,7 @@ struct EditModal {
     is_mounted: bool,
     needs_mount: MountAction,
     selected: EditSelection,
+    cursor: Option<Position>,
 }
 
 impl EditModal {
@@ -425,6 +496,7 @@ impl EditModal {
             is_mounted: row.is_mounted,
             needs_mount: row.needs_mount,
             selected: Default::default(),
+            cursor: Default::default(),
         }
     }
 
@@ -474,8 +546,8 @@ impl EditModal {
         Ok(RunState::Running)
     }
 
-    pub fn draw(&self, frame: &mut Frame) {
-        let area = frame.area().centered(
+    pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+        let area = area.centered(
             Constraint::Percentage(50),
             Constraint::Length(8), // top and bottom border + content
         );
@@ -487,27 +559,33 @@ impl EditModal {
             .inner(area)
             .layout(&Layout::default().constraints([Constraint::Length(1); 6]));
 
-        frame.render_widget(Clear, area); // Clear space
-        frame.render_widget(border, area); // Draw the border of our modal
+        Clear.render(area, buf); // Clear space
+        border.render(area, buf); // Draw the border of our modal
 
         let entry_layout = Layout::horizontal([Constraint::Length(13), Constraint::Fill(1)]);
 
+        self.cursor = None;
         macro_rules! display_field {
             ($idx:expr, $label:expr, $variant:expr, $field:ident) => {{
                 let [key_area, value_area] = field_areas[$idx].layout(&entry_layout);
-                frame.render_widget(Text::from($label).bold(), key_area);
+                Text::from($label).bold().render(key_area, buf);
 
                 let scroll = self.$field.visual_scroll(value_area.width as usize);
 
                 let style = if self.selected == $variant {
                     let x = self.$field.visual_cursor().max(scroll) - scroll;
-                    frame.set_cursor_position((value_area.x + x as u16, value_area.y));
+                    self.cursor = Some(Position {
+                        x: value_area.x + x as u16,
+                        y: value_area.y,
+                    });
                     Style::default().black().on_dark_gray().bold()
                 } else {
                     Style::default()
                 };
 
-                frame.render_widget(Text::from(self.$field.value()).style(style), value_area);
+                Text::from(self.$field.value())
+                    .style(style)
+                    .render(value_area, buf);
             }};
         }
 
@@ -527,16 +605,12 @@ impl EditModal {
             .spacing(2),
         );
 
-        frame.render_widget(
-            Text::from("[Accept]")
-                .style(button_style(self.selected == EditSelection::AcceptButton)),
-            button_areas[0],
-        );
-        frame.render_widget(
-            Text::from("[Discard]")
-                .style(button_style(self.selected == EditSelection::DiscardButton)),
-            button_areas[1],
-        );
+        Text::from("[Accept]")
+            .style(button_style(self.selected == EditSelection::AcceptButton))
+            .render(button_areas[0], buf);
+        Text::from("[Discard]")
+            .style(button_style(self.selected == EditSelection::DiscardButton))
+            .render(button_areas[1], buf);
     }
 }
 
@@ -589,8 +663,8 @@ impl ConfirmModal {
         Ok(RunState::Running)
     }
 
-    pub fn draw(&self, frame: &mut Frame) {
-        let area = frame.area().centered(
+    pub fn draw(&self, area: Rect, buf: &mut Buffer) {
+        let area = area.centered(
             Constraint::Percentage(30),
             Constraint::Length(6), // top and bottom border + content
         );
@@ -605,13 +679,12 @@ impl ConfirmModal {
                 .spacing(1),
         );
 
-        frame.render_widget(Clear, area); // Clear space
-        frame.render_widget(border, area); // Draw the border of our modal
+        Clear.render(area, buf); // Clear space
+        border.render(area, buf); // Draw the border of our modal
 
-        frame.render_widget(
-            Paragraph::new(self.text.as_str()).wrap(Wrap { trim: true }),
-            field_areas[0],
-        );
+        Paragraph::new(self.text.as_str())
+            .wrap(Wrap { trim: true })
+            .render(field_areas[0], buf);
 
         let button_layout: [Rect; 3] = field_areas[1].layout(
             &Layout::horizontal([
@@ -622,14 +695,12 @@ impl ConfirmModal {
             .spacing(2),
         );
 
-        frame.render_widget(
-            Text::from("[Yes]").style(button_style(self.yes_selected)),
-            button_layout[0],
-        );
-        frame.render_widget(
-            Text::from("[No]").style(button_style(!self.yes_selected)),
-            button_layout[1],
-        );
+        Text::from("[Yes]")
+            .style(button_style(self.yes_selected))
+            .render(button_layout[0], buf);
+        Text::from("[No]")
+            .style(button_style(!self.yes_selected))
+            .render(button_layout[1], buf);
     }
 }
 
@@ -645,11 +716,19 @@ fn button_style(selected: bool) -> Style {
 struct NotifyModal {
     title: String,
     text: String,
+    scroll_state: ScrollbarState,
 }
 
 impl NotifyModal {
-    pub fn new(title: String, text: String) -> Self {
-        Self { title, text }
+    pub fn new<S: Into<String>>(title: &str, text: S) -> Self {
+        let text = text.into();
+        let num_lines = text.chars().filter(|&c| c == '\n').count();
+
+        Self {
+            title: title.to_owned(),
+            text,
+            scroll_state: ScrollbarState::new(num_lines),
+        }
     }
 
     pub fn handle_input(&mut self) -> Result<RunState<()>> {
@@ -659,6 +738,8 @@ impl NotifyModal {
             match key.code {
                 KeyCode::Esc => return Ok(RunState::Abort),
                 KeyCode::Enter => return Ok(RunState::Complete(())),
+                KeyCode::Up => self.scroll_state.prev(),
+                KeyCode::Down => self.scroll_state.next(),
                 _ => {}
             }
         }
@@ -666,10 +747,10 @@ impl NotifyModal {
         Ok(RunState::Running)
     }
 
-    pub fn draw(&self, frame: &mut Frame) {
-        let area = frame.area().centered(
-            Constraint::Percentage(30),
-            Constraint::Length(8), // top and bottom border + content
+    pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+        let area = area.centered(
+            Constraint::Length(74),     // 70 character lines + padding and border
+            Constraint::Percentage(50), // top and bottom border + content
         );
 
         let border = Block::bordered()
@@ -681,19 +762,22 @@ impl NotifyModal {
             .inner(area)
             .layout(&Layout::default().constraints([Constraint::Fill(1), Constraint::Length(1)]));
 
-        frame.render_widget(Clear, area); // Clear space
-        frame.render_widget(border, area); // Draw the border of our modal
-        frame.render_widget(
-            Paragraph::new(self.text.as_str())
-                .wrap(Wrap { trim: true })
-                .style(Style::default()),
-            field_areas[0],
-        );
+        Clear.render(area, buf); // Clear space
+        border.render(area, buf); // Draw the border of our modal
+        Paragraph::new(self.text.as_str())
+            .style(Style::default())
+            .scroll((self.scroll_state.get_position() as u16, 0))
+            .render(field_areas[0], buf);
 
-        let button_area: [Rect; 2] = field_areas[1].layout(&Layout::horizontal([
-            Constraint::Length(4),
-            Constraint::Fill(1),
-        ]));
-        frame.render_widget(Text::from("[OK]").on_dark_gray(), button_area[0]);
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(None)
+            .render(field_areas[0], buf, &mut self.scroll_state);
+
+        let button_area: [Rect; 2] = field_areas[1]
+            .layout(&Layout::horizontal([Constraint::Length(4), Constraint::Fill(1)]).spacing(1));
+
+        Text::from("[OK]")
+            .on_dark_gray()
+            .render(button_area[0], buf);
     }
 }

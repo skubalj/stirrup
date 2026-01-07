@@ -1,9 +1,28 @@
-# Saddle Up: A TUI Mount Manager
+# Saddle Up: A TUI Mount Manager 🐴
 
-Manage mounting and unmounting devices with a convenient user interface. Save
-frequently used mounts like NFS shares as profiles.
+## Features
+
+* Manage mounting and unmounting devices with a convenient, ssh compatible user interface.
+* Save frequently used mounts like NFS shares as profiles.
+* Runs the system `sudo mount` command under the hood, and prompts for password via stdin. There is no need to run the program as root.
 
 ## Acknowledgements
 
+TODO
 
 ## License
+
+Copyright (C) 2026 Joseph Skubal
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.

@@ -1,4 +1,22 @@
-use std::path::PathBuf;
+/*
+saddle-up: A TUI Mount Manager
+Copyright (C) 2026 Joseph Skubal
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+use std::{fs, path::PathBuf};
 
 use anyhow::Context;
 
@@ -9,6 +27,10 @@ mod mount;
 
 fn main() -> anyhow::Result<()> {
     let config_path = config_file_path();
+    if let Some(p) = config_path.parent() {
+        fs::create_dir_all(&p)?;
+    }
+
     let mut cfg = ConfigFile::read_from_file(&config_path)?;
 
     if let Some(result) = MountTui::run(&cfg)? {
@@ -45,9 +67,8 @@ fn main() -> anyhow::Result<()> {
 
 /// Get the path where the config file should be located
 fn config_file_path() -> PathBuf {
-    PathBuf::from("./config.cfg")
-    // directories::ProjectDirs::from("", "", "saddleup")
-    //     .expect("unable to get config directory")
-    //     .config_local_dir()
-    //     .join("config.toml")
+    directories::ProjectDirs::from("", "", "saddle-up")
+        .expect("unable to get config directory")
+        .config_local_dir()
+        .join("config.toml")
 }

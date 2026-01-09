@@ -40,6 +40,13 @@ fn main() -> anyhow::Result<()> {
         for name in result.to_mount {
             match cfg.get_config(&name) {
                 Some(x) => {
+                    if x.luks_decrypt_name.is_some() {
+                        eprintln!("Decrypting {name}");
+                        if let Err(e) = x.decrypt() {
+                            eprintln!("Error: Failed to decrypt {name}: {e}");
+                        }
+                    }
+
                     eprintln!("Mounting {name} to {}", x.mount_point.to_string_lossy());
                     if let Err(e) = x.mount() {
                         eprintln!("Error: Failed to mount {name}: {e}");
@@ -55,6 +62,13 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("Unmounting {name} from {}", x.mount_point.to_string_lossy());
                     if let Err(e) = x.unmount() {
                         eprintln!("Error: Failed to unmount {name}: {e}");
+                    }
+
+                    if x.luks_decrypt_name.is_some() {
+                        eprintln!("Closing decrypted {name}");
+                        if let Err(e) = x.encrypt() {
+                            eprintln!("Error: Failed to close decrypted {name}: {e}");
+                        }
                     }
                 }
                 None => eprintln!("Unable to find configuration with name '{name}'"),

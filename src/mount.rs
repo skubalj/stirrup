@@ -62,22 +62,35 @@ impl ConfigFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountConfiguration {
     pub device: String,
+    pub luks_decrypt_name: Option<String>,
     pub mount_point: PathBuf,
     pub filesystem: Option<String>,
 }
 
 impl MountConfiguration {
+    /// Return the device that should be mounted for this configuration. This is either the given
+    /// device, or the mapped device if this is a decyprted volume.
+    fn mount_device(&self) -> PathBuf {
+        match &self.luks_decrypt_name {
+            Some(x) => Path::new("/dev/mapper").join(x),
+            None => PathBuf::from(&self.device),
+        }
+    }
+
     /// Attempt to mount this configuration
     pub fn mount(&self) -> io::Result<()> {
-        let mut type_arg = Vec::new();
-        if let Some(ref t) = self.filesystem {
-            type_arg = vec!["-t", t];
-        }
+        let type_arg = if let Some(ref t) = self.filesystem {
+            vec!["-t", t]
+        } else {
+            Vec::new()
+        };
+
+        println!("{:?}", self.mount_device());
 
         let status = Command::new("sudo")
             .arg("mount")
             .args(type_arg)
-            .arg(&self.device)
+            .arg(self.mount_device())
             .arg(&self.mount_point)
             .status()?;
 
@@ -101,6 +114,53 @@ impl MountConfiguration {
             Err(io::Error::other("umount command did not exit successfully"))
         }
     }
+
+    pub fn decrypt(&self) -> io::Result<()> {
+        let status = Command::new("sudo")
+            .args([
+                "cryptsetup",
+                "luksOpen",
+                self.device.as_str(),
+                self.luks_decrypt_name.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "no luks decrypt name specified",
+                    )
+                })?,
+            ])
+            .status()?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "cryptsetup luksOpen ommand did not exit successfully",
+            ))
+        }
+    }
+
+    pub fn encrypt(&self) -> io::Result<()> {
+        let status = Command::new("sudo")
+            .args([
+                "cryptsetup",
+                "luksClose",
+                self.luks_decrypt_name.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "no luks decrypt name specified",
+                    )
+                })?,
+            ])
+            .status()?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "cryptsetup luksClose command did not exit successfully",
+            ))
+        }
+    }
 }
 
 /// Probe `/etc/mtab` and return the records as configurations
@@ -114,6 +174,7 @@ pub fn probe_mtab() -> io::Result<Vec<MountConfiguration>> {
             device: missing_data_msg(fields.next(), "no device found in mtab record")?.to_owned(),
             mount_point: missing_data_msg(fields.next(), "no mount point found in mtab record")?
                 .into(),
+            luks_decrypt_name: None,
             filesystem: Some(
                 missing_data_msg(fields.next(), "no filesystem found in mtab record")?.to_owned(),
             ),

@@ -28,10 +28,7 @@ use ratatui::{
         ScrollbarState, StatefulWidget, Table, TableState, Widget, Wrap,
     },
 };
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 use crate::mount::{self, ConfigFile, MountConfiguration};
@@ -250,6 +247,8 @@ GNU General Public License for more details.",
                     Cell::from(is_mounted).style(row_style),
                     Cell::from(item.name.as_str()).style(row_style),
                     Cell::from(item.config.device.as_str()).style(row_style),
+                    Cell::from(item.config.luks_decrypt_name.as_deref().unwrap_or_default())
+                        .style(row_style),
                     Cell::from(item.config.mount_point.to_string_lossy()).style(row_style),
                     Cell::from(item.config.filesystem.as_deref().unwrap_or_default())
                         .style(row_style),
@@ -262,6 +261,7 @@ GNU General Public License for more details.",
             Cell::from("Mounted:").style(style::header_text()),
             Cell::from("Name:").style(style::header_text()),
             Cell::from("Device:").style(style::header_text()),
+            Cell::from("LUKS Name:").style(style::header_text()),
             Cell::from("Mount Point:").style(style::header_text()),
             Cell::from("Filesystem:").style(style::header_text()),
         ]);
@@ -269,6 +269,7 @@ GNU General Public License for more details.",
         let col_constraints = [
             Constraint::Length(4),
             Constraint::Length(9),
+            Constraint::Fill(1),
             Constraint::Fill(1),
             Constraint::Fill(1),
             Constraint::Fill(1),
@@ -323,6 +324,7 @@ impl TableRow {
             name: Default::default(),
             config: MountConfiguration {
                 device: Default::default(),
+                luks_decrypt_name: Default::default(),
                 mount_point: Default::default(),
                 filesystem: Default::default(),
             },
@@ -343,25 +345,12 @@ impl TableRow {
 fn make_table_rows(config: &ConfigFile, mounted: &[MountConfiguration]) -> Vec<TableRow> {
     let mut rows = Vec::new();
     for (name, config) in config.iter() {
-        // `/etc/mtab` uses canonicalized paths, so we need to canonicalize our config's here.
-        // This is useful if you specify a symlink as the device path. You might do this so 
-        // that you can specify a mount by UUID, in case it is not always mounted as `/dev/sda`.
-        let mut device = PathBuf::from(&config.device);
-        if let Ok(x) = device.canonicalize() {
-            device = x;
-        }
-
-        let mut mount_point = PathBuf::from(&config.mount_point);
-        if let Ok(x) = mount_point.canonicalize() {
-            mount_point = x;
-        }
-
         rows.push(TableRow {
             name: name.to_owned(),
             config: config.clone(),
-            is_mounted: mounted.iter().any(|m| {
-                Path::new(&m.device) == device && Path::new(&m.mount_point) == mount_point
-            }),
+            is_mounted: mounted
+                .iter()
+                .any(|m| &m.mount_point == &config.mount_point),
             needs_mount: MountAction::None,
         });
     }
@@ -419,6 +408,7 @@ enum EditSelection {
     Name,
     Device,
     MountPoint,
+    LuksName,
     Filesystem,
     AcceptButton,
     DiscardButton,
@@ -433,7 +423,8 @@ impl EditSelection {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
-            Self::Filesystem => Self::MountPoint,
+            Self::LuksName => Self::MountPoint,
+            Self::Filesystem => Self::LuksName,
             Self::AcceptButton | Self::DiscardButton if is_mounted => Self::Name,
             Self::AcceptButton | Self::DiscardButton => Self::Filesystem,
         }
@@ -444,7 +435,8 @@ impl EditSelection {
             Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
-            Self::MountPoint => Self::Filesystem,
+            Self::MountPoint => Self::LuksName,
+            Self::LuksName => Self::Filesystem,
             Self::Filesystem | Self::AcceptButton => Self::AcceptButton,
             Self::DiscardButton => Self::DiscardButton,
         }
@@ -469,7 +461,8 @@ impl EditSelection {
             Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
-            Self::MountPoint => Self::Filesystem,
+            Self::MountPoint => Self::LuksName,
+            Self::LuksName => Self::Filesystem,
             Self::Filesystem => Self::AcceptButton,
             Self::AcceptButton | Self::DiscardButton => Self::DiscardButton,
         }
@@ -479,7 +472,8 @@ impl EditSelection {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
-            Self::Filesystem => Self::MountPoint,
+            Self::LuksName => Self::MountPoint,
+            Self::Filesystem => Self::LuksName,
             Self::AcceptButton if is_mounted => Self::Name,
             Self::AcceptButton => Self::Filesystem,
             Self::DiscardButton => Self::AcceptButton,
@@ -492,6 +486,7 @@ struct EditModal {
     name: Input,
     device: Input,
     mount_point: Input,
+    luks_name: Input,
     filesystem: Input,
 
     is_mounted: bool,
@@ -506,6 +501,7 @@ impl EditModal {
             name: Input::new(row.name.clone()),
             device: Input::new(row.config.device.clone()),
             mount_point: Input::new(row.config.mount_point.to_string_lossy().to_string()),
+            luks_name: Input::new(row.config.luks_decrypt_name.clone().unwrap_or_default()),
             filesystem: Input::new(row.config.filesystem.clone().unwrap_or_default()),
             is_mounted: row.is_mounted,
             needs_mount: row.needs_mount,
@@ -549,10 +545,13 @@ impl EditModal {
                     EditSelection::MountPoint => {
                         self.mount_point.handle_event(&event);
                     }
+                    EditSelection::LuksName => {
+                        self.luks_name.handle_event(&event);
+                    }
                     EditSelection::Filesystem => {
                         self.filesystem.handle_event(&event);
                     }
-                    _ => {}
+                    EditSelection::AcceptButton | EditSelection::DiscardButton => {}
                 },
             }
         }
@@ -563,15 +562,15 @@ impl EditModal {
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         let area = area.centered(
             Constraint::Percentage(50),
-            Constraint::Length(8), // top and bottom border + content
+            Constraint::Length(9), // top and bottom border + content
         );
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
             .title(Line::from(" Edit Mount Record ").style(style::header_text()));
-        let field_areas: [Rect; 6] = border
+        let field_areas: [Rect; 7] = border
             .inner(area)
-            .layout(&Layout::default().constraints([Constraint::Length(1); 6]));
+            .layout(&Layout::default().constraints([Constraint::Length(1); 7]));
 
         Clear.render(area, buf); // Clear space
         border.render(area, buf); // Draw the border of our modal
@@ -609,9 +608,10 @@ impl EditModal {
         display_field!(0, "Name:", EditSelection::Name, name);
         display_field!(1, "Device:", EditSelection::Device, device);
         display_field!(2, "Mount Point:", EditSelection::MountPoint, mount_point);
-        display_field!(3, "Filesystem:", EditSelection::Filesystem, filesystem);
+        display_field!(3, "LUKS Name:", EditSelection::LuksName, luks_name);
+        display_field!(4, "Filesystem:", EditSelection::Filesystem, filesystem);
 
-        let button_areas: [Rect; 3] = field_areas[5].layout(
+        let button_areas: [Rect; 3] = field_areas[6].layout(
             &Layout::horizontal([
                 Constraint::Length(8),
                 Constraint::Length(9),
@@ -640,6 +640,11 @@ impl From<EditModal> for TableRow {
             config: MountConfiguration {
                 device: value.device.value().into(),
                 mount_point: value.mount_point.value().into(),
+                luks_decrypt_name: if value.luks_name.value().is_empty() {
+                    None
+                } else {
+                    Some(value.luks_name.value().into())
+                },
                 filesystem: if value.filesystem.value().is_empty() {
                     None
                 } else {

@@ -3,18 +3,33 @@
 _When you need to mount up, put your foot in the stirrup_
 
 Stirrup makes it easy to mount and unmount external filesystems on your Linux
-system. It uses the same `sudo mount` command that you are familiar with, but
+system. It uses the same `mount` command that you are familiar with, but 
 provides a TUI based layer on top which allows you to save configurations for
-common mounts. This might not be that useful if you're just plugging in a flash
-drive, but it's great for remembering your NFS shares.
+common mounts. If you're simply plugging in a flash drive, it's likely easier
+to use `mount` directly, but it's great for remembering your NFS shares and frequently used devices.
+
+The terminal user interface makes stirrup particularly useful for managing
+headless systems over SSH, and integrated LUKS decryption using `cryptsetup`
+makes it easier to use secure drives. 
 
 ## Features
 
 - Manage mounting and unmounting devices with a convenient, ssh compatible user
   interface.
 - Save frequently used mounts like NFS shares as profiles.
-- Runs the system `sudo mount` command under the hood, and prompts for password
-  via stdin. There is no need to run the program itself as root.
+- Runs the system `sudo mount` and `sudo cryptsetup` commands under the hood,
+  and prompts for password via stdin. There is no need to run the program 
+  itself as root.
+- Decrypts LUKS devices as part of the mounting process (using `cryptsetup`)
+
+## Notes
+
+- If you want to set up a configuration for a physical device, do not use the
+  "proper" device name (eg: `/dev/sda1`). Many systems assign `sda`, `sdb`, etc
+  on a first-come-first-served basis, so a drive that is `/dev/sda` today 
+  could be `/dev/sdb` tomorrow. Instead, use the symlinks in `/dev/disk/by-uuid`
+  or `/dev/disk/by-label`. These symlinks will point to where the disk is
+  actually attached.
 
 ## Acknowledgements
 

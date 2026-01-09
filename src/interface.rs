@@ -28,7 +28,10 @@ use ratatui::{
         ScrollbarState, StatefulWidget, Table, TableState, Widget, Wrap,
     },
 };
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 use crate::mount::{self, ConfigFile, MountConfiguration};
@@ -340,12 +343,25 @@ impl TableRow {
 fn make_table_rows(config: &ConfigFile, mounted: &[MountConfiguration]) -> Vec<TableRow> {
     let mut rows = Vec::new();
     for (name, config) in config.iter() {
+        // `/etc/mtab` uses canonicalized paths, so we need to canonicalize our config's here.
+        // This is useful if you specify a symlink as the device path. You might do this so 
+        // that you can specify a mount by UUID, in case it is not always mounted as `/dev/sda`.
+        let mut device = PathBuf::from(&config.device);
+        if let Ok(x) = device.canonicalize() {
+            device = x;
+        }
+
+        let mut mount_point = PathBuf::from(&config.mount_point);
+        if let Ok(x) = mount_point.canonicalize() {
+            mount_point = x;
+        }
+
         rows.push(TableRow {
             name: name.to_owned(),
             config: config.clone(),
-            is_mounted: mounted
-                .iter()
-                .any(|m| m.device == config.device && m.mount_point == config.mount_point),
+            is_mounted: mounted.iter().any(|m| {
+                Path::new(&m.device) == device && Path::new(&m.mount_point) == mount_point
+            }),
             needs_mount: MountAction::None,
         });
     }

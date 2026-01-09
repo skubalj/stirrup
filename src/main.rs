@@ -18,8 +18,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::{fs, path::PathBuf};
 
-use anyhow::Context;
-
 use crate::{interface::MountTui, mount::ConfigFile};
 
 mod interface;
@@ -43,8 +41,9 @@ fn main() -> anyhow::Result<()> {
             match cfg.get_config(&name) {
                 Some(x) => {
                     eprintln!("Mounting {name} to {}", x.mount_point.to_string_lossy());
-                    x.mount()
-                        .with_context(|| format!("failed to mount {name}"))?
+                    if let Err(e) = x.mount() {
+                        eprintln!("Error: Failed to mount {name}: {e}");
+                    }
                 }
                 None => eprintln!("Unable to find configuration with name '{name}'"),
             }
@@ -54,8 +53,9 @@ fn main() -> anyhow::Result<()> {
             match cfg.get_config(&name) {
                 Some(x) => {
                     eprintln!("Unmounting {name} from {}", x.mount_point.to_string_lossy());
-                    x.unmount()
-                        .with_context(|| format!("failed to unmount {name}"))?
+                    if let Err(e) = x.unmount() {
+                        eprintln!("Error: Failed to unmount {name}: {e}");
+                    }
                 }
                 None => eprintln!("Unable to find configuration with name '{name}'"),
             }

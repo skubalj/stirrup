@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Get the path where the config file should be located
 fn config_file_path() -> PathBuf {
-    directories::ProjectDirs::from("", "", "saddle-up")
+    directories::ProjectDirs::from("", "", "stirrup")
         .expect("unable to get config directory")
         .config_local_dir()
         .join("config.toml")

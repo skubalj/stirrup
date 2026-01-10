@@ -27,9 +27,12 @@ makes it easier to use secure drives.
 - If you want to set up a configuration for a physical device, do not use the
   "proper" device name (eg: `/dev/sda1`). Many systems assign `sda`, `sdb`, etc
   on a first-come-first-served basis, so a drive that is `/dev/sda` today 
-  could be `/dev/sdb` tomorrow. Instead, use the symlinks in `/dev/disk/by-uuid`
-  or `/dev/disk/by-label`. These symlinks will point to where the disk is
-  actually attached.
+  could be `/dev/sdb` tomorrow. Instead, use the symlinks in `/dev/disk/by-id`,
+  `/dev/disk/by-uuid`, or `/dev/disk/by-label`. These symlinks will point to
+  where the disk is actually attached.
+
+- Configurations are stored in `~/.config/stirrup`. If you uninstall Stirrup,
+  you will probably want to remove this file too.
 
 ## Acknowledgements
 

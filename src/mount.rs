@@ -85,8 +85,6 @@ impl MountConfiguration {
             Vec::new()
         };
 
-        println!("{:?}", self.mount_device());
-
         let status = Command::new("sudo")
             .arg("mount")
             .args(type_arg)

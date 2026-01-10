@@ -92,28 +92,38 @@ impl MountTui {
             ModalState::EditModal(edit_modal) => match edit_modal.handle_input()? {
                 RunState::Running => {}
                 RunState::Complete(row) => {
+                    let mut errors = row.validate();
                     self.table_rows[self.table_state.selected().unwrap()] = row;
                     self.table_rows.sort_by(|a, b| a.name.cmp(&b.name));
 
-                    self.modal = match self
+                    if let Some(x) = self
                         .table_rows
                         .windows(2)
                         .find(|window| window[0].name == window[1].name)
                         .map(|x| x[0].name.as_str())
                     {
-                        Some(x) => ModalState::Notification(NotifyModal::new(
-                            "Error",
-                            format!(
-                                "Configuration '{x}' is duplicated.
-
+                        errors.push(format!(
+                            "Configuration '{x}' is duplicated.
+    
 Configuration names must be unique. If you save the configurations
 without fixing this, one variant may overwrite another"
-                            ),
-                        )),
-                        None => ModalState::None,
+                        ));
                     }
+
+                    self.modal = if !errors.is_empty() {
+                        ModalState::Notification(NotifyModal::new("Error", errors.join("\n\n")))
+                    } else {
+                        ModalState::None
+                    };
                 }
-                RunState::Abort => self.modal = ModalState::None,
+                RunState::Abort => {
+                    let selected_idx = self.table_state.selected().unwrap();
+                    if self.table_rows[selected_idx].is_empty() {
+                        self.table_rows.remove(selected_idx);
+                    }
+
+                    self.modal = ModalState::None;
+                }
             },
             ModalState::DeleteConfirmModal(confirm_modal) => match confirm_modal.handle_input()? {
                 RunState::Running => {}
@@ -337,6 +347,32 @@ impl TableRow {
             MountAction::None => MountAction::Mount,
             MountAction::Mount | MountAction::Unmount => MountAction::None,
         }
+    }
+
+    /// Check whether the fields in this table make sense
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.name.is_empty() {
+            errors.push("The 'name' field cannot be empty.".into())
+        }
+        if self.config.device.is_empty() {
+            errors.push("The 'device' field cannot be empty.".into())
+        }
+        if self.config.mount_point.as_os_str().is_empty() {
+            errors.push("The 'mount_point' field cannot be empty.".into())
+        }
+
+        errors
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.name.is_empty()
+            && self.config.device.is_empty()
+            && self.config.luks_decrypt_name.is_none()
+            && self.config.mount_point.as_os_str().is_empty()
+            && self.config.filesystem.is_none()
+            && !self.is_mounted
+            && self.needs_mount == MountAction::None
     }
 }
 

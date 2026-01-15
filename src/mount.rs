@@ -19,7 +19,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
     process::Command,
@@ -27,22 +26,24 @@ use std::{
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ConfigFile {
-    mounts: BTreeMap<String, MountConfiguration>,
+    mounts: Vec<MountConfiguration>,
 }
 
 impl ConfigFile {
-    pub fn new(mounts: BTreeMap<String, MountConfiguration>) -> Self {
+    pub fn new(mut mounts: Vec<MountConfiguration>) -> Self {
+        mounts.sort_by(|a, b| a.name.cmp(&b.name));
         Self { mounts }
     }
 
     pub fn read_from_file(p: &Path) -> anyhow::Result<ConfigFile> {
-        let data = match fs::read(p) {
-            Ok(x) => x,
+        let mut file: ConfigFile = match fs::read(p) {
+            Ok(data) => toml::from_slice(&data).context("unable to deserialize config file")?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e).context("unable to open config file"),
         };
 
-        toml::from_slice(&data).context("unable to deserialize config file")
+        file.mounts.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(file)
     }
 
     pub fn write_to_file(&self, p: &Path) -> anyhow::Result<()> {
@@ -51,30 +52,37 @@ impl ConfigFile {
     }
 
     pub fn get_config(&self, name: &str) -> Option<&MountConfiguration> {
-        self.mounts.get(name)
+        self.mounts
+            .binary_search_by(|probe| probe.name.as_str().cmp(name))
+            .ok()
+            .and_then(|idx| self.mounts.get(idx))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &MountConfiguration)> {
+    pub fn iter(&self) -> impl Iterator<Item = &MountConfiguration> {
         self.mounts.iter()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountConfiguration {
+    pub name: String,
     pub device: String,
-    pub luks_decrypt_name: Option<String>,
+    pub is_luks_encrypted: bool,
     pub mount_point: PathBuf,
     pub filesystem: Option<String>,
 }
 
 impl MountConfiguration {
-    /// Return the device that should be mounted for this configuration. This is either the given
-    /// device, or the mapped device if this is a decyprted volume.
-    fn mount_device(&self) -> PathBuf {
-        match &self.luks_decrypt_name {
-            Some(x) => Path::new("/dev/mapper").join(x),
-            None => PathBuf::from(&self.device),
-        }
+    /// The name that will be used when creating a cryptsetup mapping
+    fn cryptsetup_mapping(&self) -> String {
+        let mut prefix = String::from("stirrup-");
+        prefix.extend(
+            self.name
+                .chars()
+                .map(|x| if x.is_ascii_alphanumeric() { x } else { '_' }),
+        );
+
+        prefix
     }
 
     /// Attempt to mount this configuration
@@ -85,10 +93,16 @@ impl MountConfiguration {
             Vec::new()
         };
 
+        let mount_device = if self.is_luks_encrypted {
+            Path::new("/dev/mapper").join(self.cryptsetup_mapping())
+        } else {
+            PathBuf::from(&self.device)
+        };
+
         let status = Command::new("sudo")
             .arg("mount")
             .args(type_arg)
-            .arg(self.mount_device())
+            .arg(mount_device)
             .arg(&self.mount_point)
             .status()?;
 
@@ -119,12 +133,7 @@ impl MountConfiguration {
                 "cryptsetup",
                 "luksOpen",
                 self.device.as_str(),
-                self.luks_decrypt_name.as_ref().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "no luks decrypt name specified",
-                    )
-                })?,
+                &self.cryptsetup_mapping(),
             ])
             .status()?;
 
@@ -139,16 +148,7 @@ impl MountConfiguration {
 
     pub fn encrypt(&self) -> io::Result<()> {
         let status = Command::new("sudo")
-            .args([
-                "cryptsetup",
-                "luksClose",
-                self.luks_decrypt_name.as_ref().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "no luks decrypt name specified",
-                    )
-                })?,
-            ])
+            .args(["cryptsetup", "luksClose", &self.cryptsetup_mapping()])
             .status()?;
 
         if status.success() {
@@ -169,10 +169,11 @@ pub fn probe_mtab() -> io::Result<Vec<MountConfiguration>> {
     for record in data.lines() {
         let mut fields = record.split_ascii_whitespace().take(3);
         configs.push(MountConfiguration {
+            name: String::new(),
             device: missing_data_msg(fields.next(), "no device found in mtab record")?.to_owned(),
             mount_point: missing_data_msg(fields.next(), "no mount point found in mtab record")?
                 .into(),
-            luks_decrypt_name: None,
+            is_luks_encrypted: false,
             filesystem: Some(
                 missing_data_msg(fields.next(), "no filesystem found in mtab record")?.to_owned(),
             ),

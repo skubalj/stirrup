@@ -40,10 +40,11 @@ fn main() -> anyhow::Result<()> {
         for name in result.to_mount {
             match cfg.get_config(&name) {
                 Some(x) => {
-                    if x.luks_decrypt_name.is_some() {
+                    if x.is_luks_encrypted {
                         eprintln!("Decrypting {name}");
                         if let Err(e) = x.decrypt() {
                             eprintln!("Error: Failed to decrypt {name}: {e}");
+                            continue;
                         }
                     }
 
@@ -64,7 +65,7 @@ fn main() -> anyhow::Result<()> {
                         eprintln!("Error: Failed to unmount {name}: {e}");
                     }
 
-                    if x.luks_decrypt_name.is_some() {
+                    if x.is_luks_encrypted {
                         eprintln!("Closing decrypted {name}");
                         if let Err(e) = x.encrypt() {
                             eprintln!("Error: Failed to close decrypted {name}: {e}");

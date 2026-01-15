@@ -74,7 +74,7 @@ enum EditSelection {
     Name,
     Device,
     MountPoint,
-    LuksName,
+    IsEncrypted,
     Filesystem,
     AcceptButton,
     DiscardButton,
@@ -89,8 +89,8 @@ impl EditSelection {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
-            Self::LuksName => Self::MountPoint,
-            Self::Filesystem => Self::LuksName,
+            Self::IsEncrypted => Self::MountPoint,
+            Self::Filesystem => Self::IsEncrypted,
             Self::AcceptButton | Self::DiscardButton if is_mounted => Self::Name,
             Self::AcceptButton | Self::DiscardButton => Self::Filesystem,
         }
@@ -101,8 +101,8 @@ impl EditSelection {
             Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
-            Self::MountPoint => Self::LuksName,
-            Self::LuksName => Self::Filesystem,
+            Self::MountPoint => Self::IsEncrypted,
+            Self::IsEncrypted => Self::Filesystem,
             Self::Filesystem | Self::AcceptButton => Self::AcceptButton,
             Self::DiscardButton => Self::DiscardButton,
         }
@@ -127,8 +127,8 @@ impl EditSelection {
             Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
-            Self::MountPoint => Self::LuksName,
-            Self::LuksName => Self::Filesystem,
+            Self::MountPoint => Self::IsEncrypted,
+            Self::IsEncrypted => Self::Filesystem,
             Self::Filesystem => Self::AcceptButton,
             Self::AcceptButton | Self::DiscardButton => Self::DiscardButton,
         }
@@ -138,8 +138,8 @@ impl EditSelection {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
-            Self::LuksName => Self::MountPoint,
-            Self::Filesystem => Self::LuksName,
+            Self::IsEncrypted => Self::MountPoint,
+            Self::Filesystem => Self::IsEncrypted,
             Self::AcceptButton if is_mounted => Self::Name,
             Self::AcceptButton => Self::Filesystem,
             Self::DiscardButton => Self::AcceptButton,
@@ -152,7 +152,7 @@ pub struct EditModal {
     name: Input,
     device: Input,
     mount_point: Input,
-    luks_name: Input,
+    is_encrypted: bool,
     filesystem: Input,
 
     is_mounted: bool,
@@ -164,10 +164,10 @@ pub struct EditModal {
 impl EditModal {
     pub fn new(row: &TableRow) -> Self {
         Self {
-            name: Input::new(row.name.clone()),
+            name: Input::new(row.config.name.clone()),
             device: Input::new(row.config.device.clone()),
             mount_point: Input::new(row.config.mount_point.to_string_lossy().to_string()),
-            luks_name: Input::new(row.config.luks_decrypt_name.clone().unwrap_or_default()),
+            is_encrypted: row.config.is_luks_encrypted,
             filesystem: Input::new(row.config.filesystem.clone().unwrap_or_default()),
             is_mounted: row.is_mounted,
             needs_mount: row.needs_mount,
@@ -201,6 +201,10 @@ impl EditModal {
                 KeyCode::Tab => self.selected = self.selected.next(self.is_mounted),
                 KeyCode::BackTab => self.selected = self.selected.previous(self.is_mounted),
 
+                KeyCode::Char(' ') if self.selected == EditSelection::IsEncrypted => {
+                    self.is_encrypted = !self.is_encrypted
+                }
+
                 _ => match self.selected {
                     EditSelection::Name => {
                         self.name.handle_event(&event);
@@ -211,9 +215,7 @@ impl EditModal {
                     EditSelection::MountPoint => {
                         self.mount_point.handle_event(&event);
                     }
-                    EditSelection::LuksName => {
-                        self.luks_name.handle_event(&event);
-                    }
+                    EditSelection::IsEncrypted => {}
                     EditSelection::Filesystem => {
                         self.filesystem.handle_event(&event);
                     }
@@ -234,14 +236,17 @@ impl EditModal {
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
             .title(Line::from(" Edit Mount Record ").style(style::header_text()));
-        let field_areas: [Rect; 7] = border
+
+        let [content, buttons] = border
             .inner(area)
-            .layout(&Layout::default().constraints([Constraint::Length(1); 7]));
+            .layout(&Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).spacing(1));
 
         Clear.render(area, buf); // Clear space
         border.render(area, buf); // Draw the border of our modal
 
-        let entry_layout = Layout::horizontal([Constraint::Length(13), Constraint::Fill(1)]);
+        let entry_layout =
+            Layout::horizontal([Constraint::Length(15), Constraint::Fill(1)]).spacing(1);
+        let field_areas: [Rect; 5] = content.layout(&Layout::vertical([Constraint::Length(1); 5]));
 
         self.cursor = None;
         macro_rules! display_field {
@@ -274,10 +279,27 @@ impl EditModal {
         display_field!(0, "Name:", EditSelection::Name, name);
         display_field!(1, "Device:", EditSelection::Device, device);
         display_field!(2, "Mount Point:", EditSelection::MountPoint, mount_point);
-        display_field!(3, "LUKS Name:", EditSelection::LuksName, luks_name);
+
+        {
+            let [key_area, value_area] = field_areas[3].layout(&entry_layout);
+            Line::from("LUKS Encrypted:")
+                .style(style::header_text())
+                .render(key_area, buf);
+
+            Line::from(if self.is_encrypted { "[X]" } else { "[ ]" })
+                .style(if self.selected == EditSelection::IsEncrypted {
+                    style::highlight_text()
+                } else if self.is_mounted {
+                    style::disabled_text()
+                } else {
+                    style::default_text()
+                })
+                .render(value_area, buf);
+        }
+
         display_field!(4, "Filesystem:", EditSelection::Filesystem, filesystem);
 
-        let button_areas: [Rect; 3] = field_areas[6].layout(
+        let button_areas: [Rect; 3] = buttons.layout(
             &Layout::horizontal([
                 Constraint::Length(8),
                 Constraint::Length(9),
@@ -302,15 +324,11 @@ impl EditModal {
 impl From<EditModal> for TableRow {
     fn from(value: EditModal) -> Self {
         Self {
-            name: value.name.value().into(),
             config: MountConfiguration {
+                name: value.name.value().into(),
                 device: value.device.value().into(),
                 mount_point: value.mount_point.value().into(),
-                luks_decrypt_name: if value.luks_name.value().is_empty() {
-                    None
-                } else {
-                    Some(value.luks_name.value().into())
-                },
+                is_luks_encrypted: value.is_encrypted,
                 filesystem: if value.filesystem.value().is_empty() {
                     None
                 } else {

@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use crate::mount::{self, ConfigFile, MountConfiguration};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
@@ -24,9 +25,6 @@ use ratatui::{
     text::{Line, Text},
     widgets::{Block, Cell, Padding, Row, Table, TableState},
 };
-use std::collections::BTreeMap;
-
-use crate::mount::{self, ConfigFile, MountConfiguration};
 
 mod modal;
 use modal::{ConfirmModal, EditModal, Modal, ModalState, NotifyModal};
@@ -72,12 +70,12 @@ impl MountTui {
             let mut actions = TuiActions::default();
             for row in table_rows.into_iter() {
                 match row.needs_mount {
-                    MountAction::Mount => actions.to_mount.push(row.name.clone()),
-                    MountAction::Unmount => actions.to_unmount.push(row.name.clone()),
+                    MountAction::Mount => actions.to_mount.push(row.config.name.clone()),
+                    MountAction::Unmount => actions.to_unmount.push(row.config.name.clone()),
                     MountAction::None => {}
                 }
 
-                actions.configurations.insert(row.name, row.config);
+                actions.configurations.push(row.config);
             }
 
             Ok(Some(actions))
@@ -94,13 +92,14 @@ impl MountTui {
                 RunState::Complete(row) => {
                     let mut errors = row.validate();
                     self.table_rows[self.table_state.selected().unwrap()] = row;
-                    self.table_rows.sort_by(|a, b| a.name.cmp(&b.name));
+                    self.table_rows
+                        .sort_by(|a, b| a.config.name.cmp(&b.config.name));
 
                     if let Some(x) = self
                         .table_rows
                         .windows(2)
-                        .find(|window| window[0].name == window[1].name)
-                        .map(|x| x[0].name.as_str())
+                        .find(|window| window[0].config.name == window[1].config.name)
+                        .map(|x| x[0].config.name.as_str())
                     {
                         errors.push(format!(
                             "Configuration '{x}' is duplicated.
@@ -177,7 +176,7 @@ without fixing this, one variant may overwrite another"
         {
             self.modal = ModalState::DeleteConfirmModal(ConfirmModal::new(format!(
                 "Are you sure you want to delete '{}'?",
-                row.name
+                row.config.name
             )));
         }
     }
@@ -253,11 +252,10 @@ GNU General Public License for more details.",
                 Row::from_iter(vec![
                     Cell::from(format!("{:3}", idx + 1)).style(row_style),
                     Cell::from(is_mounted).style(row_style),
-                    Cell::from(item.name.as_str()).style(row_style),
+                    Cell::from(item.config.name.as_str()).style(row_style),
                     Cell::from(item.config.device.as_str()).style(row_style),
-                    Cell::from(item.config.luks_decrypt_name.as_deref().unwrap_or_default())
-                        .style(row_style),
                     Cell::from(item.config.mount_point.to_string_lossy()).style(row_style),
+                    Cell::from(display_boolean(item.config.is_luks_encrypted)).style(row_style),
                     Cell::from(item.config.filesystem.as_deref().unwrap_or_default())
                         .style(row_style),
                 ])
@@ -269,8 +267,8 @@ GNU General Public License for more details.",
             Cell::from("Mounted:").style(style::header_text()),
             Cell::from("Name:").style(style::header_text()),
             Cell::from("Device:").style(style::header_text()),
-            Cell::from("LUKS Name:").style(style::header_text()),
             Cell::from("Mount Point:").style(style::header_text()),
+            Cell::from("LUKS Encrypted:").style(style::header_text()),
             Cell::from("Filesystem:").style(style::header_text()),
         ]);
 
@@ -280,8 +278,8 @@ GNU General Public License for more details.",
             Constraint::Fill(1),
             Constraint::Fill(1),
             Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Length(10),
+            Constraint::Length(16),
+            Constraint::Length(11),
         ];
 
         let table = Table::new(table_rows, col_constraints)
@@ -320,7 +318,6 @@ impl MountAction {
 
 #[derive(Debug, Clone)]
 struct TableRow {
-    pub name: String,
     pub config: MountConfiguration,
     pub is_mounted: bool,
     pub needs_mount: MountAction,
@@ -329,10 +326,10 @@ struct TableRow {
 impl TableRow {
     pub fn new() -> Self {
         Self {
-            name: Default::default(),
             config: MountConfiguration {
+                name: Default::default(),
                 device: Default::default(),
-                luks_decrypt_name: Default::default(),
+                is_luks_encrypted: Default::default(),
                 mount_point: Default::default(),
                 filesystem: Default::default(),
             },
@@ -352,7 +349,7 @@ impl TableRow {
     /// Check whether the fields in this table make sense
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
-        if self.name.is_empty() {
+        if self.config.name.is_empty() {
             errors.push("The 'name' field cannot be empty.".into())
         }
         if self.config.device.is_empty() {
@@ -366,9 +363,9 @@ impl TableRow {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.name.is_empty()
+        self.config.name.is_empty()
             && self.config.device.is_empty()
-            && self.config.luks_decrypt_name.is_none()
+            && !self.config.is_luks_encrypted
             && self.config.mount_point.as_os_str().is_empty()
             && self.config.filesystem.is_none()
             && !self.is_mounted
@@ -378,9 +375,8 @@ impl TableRow {
 
 fn make_table_rows(config: &ConfigFile, mounted: &[MountConfiguration]) -> Vec<TableRow> {
     let mut rows = Vec::new();
-    for (name, config) in config.iter() {
+    for config in config.iter() {
         rows.push(TableRow {
-            name: name.to_owned(),
             config: config.clone(),
             is_mounted: mounted
                 .iter()
@@ -394,7 +390,7 @@ fn make_table_rows(config: &ConfigFile, mounted: &[MountConfiguration]) -> Vec<T
 /// The set of actions that were specified on the TUI
 #[derive(Debug, Default)]
 pub struct TuiActions {
-    pub configurations: BTreeMap<String, MountConfiguration>,
+    pub configurations: Vec<MountConfiguration>,
     /// The names of configurations that need to be mounted
     pub to_mount: Vec<String>,
     /// The names of configurations that need to be unmounted

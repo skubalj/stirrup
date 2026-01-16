@@ -19,7 +19,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write, stdout},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -73,9 +74,13 @@ pub struct MountConfiguration {
 }
 
 impl MountConfiguration {
+    const CRYPTSETUP_MAPPING_PREFIX: &'static str = "stirrup-";
+
     /// The name that will be used when creating a cryptsetup mapping
     fn cryptsetup_mapping(&self) -> String {
-        let mut prefix = String::from("stirrup-");
+        let mut prefix =
+            String::with_capacity(Self::CRYPTSETUP_MAPPING_PREFIX.len() + self.name.len());
+        prefix += Self::CRYPTSETUP_MAPPING_PREFIX;
         prefix.extend(
             self.name
                 .chars()
@@ -104,6 +109,7 @@ impl MountConfiguration {
             .args(type_arg)
             .arg(mount_device)
             .arg(&self.mount_point)
+            .println()
             .status()?;
 
         if status.success() {
@@ -118,6 +124,7 @@ impl MountConfiguration {
         let status = Command::new("sudo")
             .arg("umount")
             .arg(&self.mount_point)
+            .println()
             .status()?;
 
         if status.success() {
@@ -135,6 +142,7 @@ impl MountConfiguration {
                 self.device.as_str(),
                 &self.cryptsetup_mapping(),
             ])
+            .println()
             .status()?;
 
         if status.success() {
@@ -149,6 +157,7 @@ impl MountConfiguration {
     pub fn encrypt(&self) -> io::Result<()> {
         let status = Command::new("sudo")
             .args(["cryptsetup", "luksClose", &self.cryptsetup_mapping()])
+            .println()
             .status()?;
 
         if status.success() {
@@ -158,6 +167,38 @@ impl MountConfiguration {
                 "cryptsetup luksClose command did not exit successfully",
             ))
         }
+    }
+}
+
+/// A trait to shim in a method that allows us to inspect a command and print it from within the builder tree
+trait PrintCommandShim {
+    fn println(&mut self) -> &mut Self;
+}
+
+impl PrintCommandShim for Command {
+    fn println(&mut self) -> &mut Self {
+        let mut stdout = stdout().lock();
+        write!(
+            stdout,
+            "Running command: \"{}",
+            self.get_program().display()
+        )
+        .unwrap();
+        for entry in self.get_args() {
+            let needs_quotes = entry
+                .to_str()
+                .map(|s| s.chars().any(|x| x.is_whitespace()))
+                .unwrap_or(true);
+
+            if needs_quotes {
+                write!(stdout, " '{}'", entry.display()).unwrap();
+            } else {
+                write!(stdout, " {}", entry.display()).unwrap();
+            }
+        }
+        println!("\"");
+
+        self
     }
 }
 

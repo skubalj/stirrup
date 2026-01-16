@@ -16,14 +16,27 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::{fs, path::PathBuf};
+use anyhow::bail;
+use crossterm::tty::IsTty;
+use std::{fs, io::stdout, path::PathBuf};
 
 use crate::{interface::MountTui, mount::ConfigFile};
 
 mod interface;
 mod mount;
 
+macro_rules! println_colored {
+    ($($arg:tt)*) => {{
+        use crossterm::style::Stylize;
+        println!("{}", crossterm::style::style(format!($($arg)*)).with(crossterm::style::Color::Blue));
+    }};
+}
+
 fn main() -> anyhow::Result<()> {
+    if !stdout().is_tty() {
+        bail!("stirrup must be run interactively");
+    }
+
     let config_path = config_file_path();
     if let Some(p) = config_path.parent() {
         fs::create_dir_all(p)?;
@@ -41,14 +54,14 @@ fn main() -> anyhow::Result<()> {
             match cfg.get_config(&name) {
                 Some(x) => {
                     if x.is_luks_encrypted {
-                        eprintln!("Decrypting {name}");
+                        println_colored!("Decrypting {name}:");
                         if let Err(e) = x.decrypt() {
                             eprintln!("Error: Failed to decrypt {name}: {e}");
                             continue;
                         }
                     }
 
-                    eprintln!("Mounting {name} to {}", x.mount_point.to_string_lossy());
+                    println_colored!("Mounting {name}:");
                     if let Err(e) = x.mount() {
                         eprintln!("Error: Failed to mount {name}: {e}");
                     }
@@ -60,13 +73,13 @@ fn main() -> anyhow::Result<()> {
         for name in result.to_unmount {
             match cfg.get_config(&name) {
                 Some(x) => {
-                    eprintln!("Unmounting {name} from {}", x.mount_point.to_string_lossy());
+                    println_colored!("Unmounting {name}:");
                     if let Err(e) = x.unmount() {
                         eprintln!("Error: Failed to unmount {name}: {e}");
                     }
 
                     if x.is_luks_encrypted {
-                        eprintln!("Closing decrypted {name}");
+                        println_colored!("Closing decrypted {name}:");
                         if let Err(e) = x.encrypt() {
                             eprintln!("Error: Failed to close decrypted {name}: {e}");
                         }

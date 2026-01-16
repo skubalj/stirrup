@@ -6,7 +6,9 @@ authors = ["Joseph Skubal"]
 license = "GPL-3.0-or-later"
 readme = "README.md"
 repository = "https://github.com/skubalj/stirrup"
-description = "Interactive terminal filesystem mount manager"
+description = "Terminal based linux filesystem mount manager"
+categories = ["command-line-utilities", "filesystem"]
+keywords = ["TUI", "linux", "mount"]
 
 [profile.release]
 lto = true

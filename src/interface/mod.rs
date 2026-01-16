@@ -16,14 +16,14 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::mount::{self, ConfigFile, MountConfiguration};
+use crate::mount::{self, ConfigFile, MountConfiguration, probe_mtab};
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
-    text::{Line, Text},
-    widgets::{Block, Cell, Padding, Row, Table, TableState},
+    layout::{Constraint, Layout, Margin, Rect},
+    text::Line,
+    widgets::{Block, Cell, Padding, Row, Table, TableState, Widget},
 };
 
 mod modal;
@@ -40,16 +40,18 @@ enum RunState<T> {
 pub struct MountTui {
     table_state: TableState,
     table_rows: Vec<TableRow>,
+    mounted_configs: Vec<MountConfiguration>,
     modal: ModalState,
 }
 
 impl MountTui {
     pub fn run(config: &ConfigFile) -> Result<Option<TuiActions>> {
-        let mounted = mount::probe_mtab().context("failed to probe /etc/mtab")?;
+        let mounted_configs = mount::probe_mtab().context("failed to probe /etc/mtab")?;
 
         let mut tui = Self {
             table_state: Default::default(),
-            table_rows: make_table_rows(config, &mounted),
+            table_rows: make_table_rows(config, &mounted_configs),
+            mounted_configs,
             modal: Default::default(),
         };
 
@@ -85,37 +87,24 @@ impl MountTui {
     }
 
     fn handle_input(&mut self) -> Result<RunState<()>> {
+        let event = event::read()?;
+
+        // Ctrl+c abort handler
+        if let Event::Key(key) = event
+            && key.kind.is_press()
+            && matches!(key.code, KeyCode::Char('c'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return Ok(RunState::Abort);
+        }
+
         match &mut self.modal {
-            ModalState::None => return self.handle_main_input(),
-            ModalState::EditModal(edit_modal) => match edit_modal.handle_input()? {
+            ModalState::None => return self.handle_main_input(event),
+            ModalState::EditModal(edit_modal) => match edit_modal.handle_input(event) {
                 RunState::Running => {}
-                RunState::Complete(row) => {
-                    let mut errors = row.validate();
-                    self.table_rows[self.table_state.selected().unwrap()] = row;
-                    self.table_rows
-                        .sort_by(|a, b| a.config.name.cmp(&b.config.name));
-
-                    if let Some(x) = self
-                        .table_rows
-                        .windows(2)
-                        .find(|window| window[0].config.name == window[1].config.name)
-                        .map(|x| x[0].config.name.as_str())
-                    {
-                        errors.push(format!(
-                            "Configuration '{x}' is duplicated.
-    
-Configuration names must be unique. If you save the configurations
-without fixing this, one variant may overwrite another"
-                        ));
-                    }
-
-                    self.modal = if !errors.is_empty() {
-                        ModalState::Notification(NotifyModal::new("Error", errors.join("\n\n")))
-                    } else {
-                        ModalState::None
-                    };
-                }
+                RunState::Complete(row) => self.close_edit_modal(row),
                 RunState::Abort => {
+                    // If we were adding a new config, remove the empty entry from the table
                     let selected_idx = self.table_state.selected().unwrap();
                     if self.table_rows[selected_idx].is_empty() {
                         self.table_rows.remove(selected_idx);
@@ -124,15 +113,17 @@ without fixing this, one variant may overwrite another"
                     self.modal = ModalState::None;
                 }
             },
-            ModalState::DeleteConfirmModal(confirm_modal) => match confirm_modal.handle_input()? {
-                RunState::Running => {}
-                RunState::Complete(true) => {
-                    self.table_rows.remove(self.table_state.selected().unwrap());
-                    self.modal = ModalState::None;
+            ModalState::DeleteConfirmModal(confirm_modal) => {
+                match confirm_modal.handle_input(event) {
+                    RunState::Running => {}
+                    RunState::Complete(true) => {
+                        self.table_rows.remove(self.table_state.selected().unwrap());
+                        self.modal = ModalState::None;
+                    }
+                    RunState::Complete(false) | RunState::Abort => self.modal = ModalState::None,
                 }
-                RunState::Complete(false) | RunState::Abort => self.modal = ModalState::None,
-            },
-            ModalState::Notification(notification) => match notification.handle_input()? {
+            }
+            ModalState::Notification(notification) => match notification.handle_input(event) {
                 RunState::Running => {}
                 RunState::Complete(()) | RunState::Abort => self.modal = ModalState::None,
             },
@@ -141,8 +132,8 @@ without fixing this, one variant may overwrite another"
         Ok(RunState::Running)
     }
 
-    fn handle_main_input(&mut self) -> Result<RunState<()>> {
-        if let Event::Key(key) = event::read()?
+    fn handle_main_input(&mut self, event: Event) -> Result<RunState<()>> {
+        if let Event::Key(key) = event
             && key.kind.is_press()
         {
             match key.code {
@@ -154,12 +145,42 @@ without fixing this, one variant may overwrite another"
                 KeyCode::Char('-') | KeyCode::Delete => self.open_delete_modal(),
                 KeyCode::Char('+') | KeyCode::Char('n') => self.add_record(),
                 KeyCode::Char('e') => self.edit_record(),
+                KeyCode::Char('r') => self.refresh_mounted_devices()?,
                 KeyCode::Char('i') => self.open_info_modal(),
                 _ => {}
             }
         }
 
         Ok(RunState::Running)
+    }
+
+    fn close_edit_modal(&mut self, mut row: TableRow) {
+        row.update_is_mounted(&self.mounted_configs);
+
+        let mut errors = row.validate();
+        self.table_rows[self.table_state.selected().unwrap()] = row;
+        self.table_rows
+            .sort_by(|a, b| a.config.name.cmp(&b.config.name));
+
+        if let Some(x) = self
+            .table_rows
+            .windows(2)
+            .find(|window| window[0].config.name == window[1].config.name)
+            .map(|x| x[0].config.name.as_str())
+        {
+            errors.push(format!(
+                "Configuration '{x}' is duplicated.
+            
+                Configuration names must be unique. If you save the configurations
+                without fixing this, one variant may overwrite another"
+            ));
+        }
+
+        self.modal = if !errors.is_empty() {
+            ModalState::Notification(NotifyModal::new("Error", errors.join("\n\n")))
+        } else {
+            ModalState::None
+        };
     }
 
     fn toggle_mounted(&mut self) {
@@ -203,7 +224,7 @@ GNU General Public License for more details.",
     }
 
     fn add_record(&mut self) {
-        self.table_rows.push(TableRow::new());
+        self.table_rows.push(TableRow::default());
         self.table_state.select(Some(self.table_rows.len() - 1));
         self.modal = ModalState::EditModal(EditModal::new(self.table_rows.last().unwrap()));
     }
@@ -212,24 +233,57 @@ GNU General Public License for more details.",
         if let Some(idx) = self.table_state.selected()
             && let Some(row) = self.table_rows.get(idx)
         {
-            self.modal = ModalState::EditModal(EditModal::new(row))
+            self.modal = if row.is_mounted {
+                ModalState::Notification(NotifyModal::new(
+                    "Error",
+                    "You cannnot edit a configuration while it is mounted",
+                ))
+            } else {
+                ModalState::EditModal(EditModal::new(row))
+            };
         }
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
-        let layout = Layout::default()
-            .constraints([Constraint::Fill(1), Constraint::Length(1)])
-            .split(frame.area());
+    fn refresh_mounted_devices(&mut self) -> Result<()> {
+        self.mounted_configs = probe_mtab()?;
+        for row in self.table_rows.iter_mut() {
+            row.update_is_mounted(&self.mounted_configs);
+        }
 
-        self.draw_table(frame, layout[0]);
-        frame.render_widget(
-            Text::from(
-                " Mount/Unmount: SPACEBAR    Delete: DEL    New: N    Edit: E    Program Info: I    Apply: ENTER    Discard: ESCAPE",
-            ).style(style::help_text()),
-            layout[1],
+        Ok(())
+    }
+
+    fn draw(&mut self, frame: &mut Frame) {
+        let help_text = KeyBindings::new(
+            &[
+                "Select: SPACEBAR",
+                "Delete: DEL",
+                "New: N",
+                "Edit: E",
+                "Refresh Mounted Devices: R",
+                "Program Info: I",
+                "Apply: ENTER",
+                "Discard: ESCAPE",
+            ],
+            frame.area().width as usize - 2, // -2 for inset padding
         );
 
-        frame.render_stateful_widget(Modal, layout[0], &mut self.modal);
+        let [table_area, help_area] = frame.area().layout(&Layout::default().constraints([
+            Constraint::Fill(1),
+            Constraint::Length(help_text.num_rows()),
+        ]));
+
+        self.draw_table(frame, table_area);
+
+        frame.render_widget(
+            help_text,
+            help_area.inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            }),
+        );
+
+        frame.render_stateful_widget(Modal, table_area, &mut self.modal);
         self.modal.set_cursor_position(frame);
     }
 
@@ -272,12 +326,23 @@ GNU General Public License for more details.",
             Cell::from("Filesystem:").style(style::header_text()),
         ]);
 
+        macro_rules! find_longest {
+            ($mapping_fn:expr) => {
+                self.table_rows
+                    .iter()
+                    .map($mapping_fn)
+                    .max()
+                    .and_then(|x| x.try_into().ok())
+                    .unwrap_or(1)
+            };
+        }
+
         let col_constraints = [
             Constraint::Length(4),
             Constraint::Length(9),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
+            Constraint::Fill(find_longest!(|r| r.config.name.len())),
+            Constraint::Fill(find_longest!(|r| r.config.device.len())),
+            Constraint::Fill(find_longest!(|r| r.config.mount_point.as_os_str().len())),
             Constraint::Length(16),
             Constraint::Length(11),
         ];
@@ -324,18 +389,26 @@ struct TableRow {
 }
 
 impl TableRow {
-    pub fn new() -> Self {
+    pub fn new(config: MountConfiguration, mounted: &[MountConfiguration]) -> Self {
         Self {
-            config: MountConfiguration {
-                name: Default::default(),
-                device: Default::default(),
-                is_luks_encrypted: Default::default(),
-                mount_point: Default::default(),
-                filesystem: Default::default(),
-            },
-            is_mounted: Default::default(),
-            needs_mount: Default::default(),
+            config: config.clone(),
+            is_mounted: Self::is_mounted(&config, mounted),
+            needs_mount: MountAction::None,
         }
+    }
+
+    pub fn update_is_mounted(&mut self, mounted: &[MountConfiguration]) {
+        let old_state = self.is_mounted;
+        self.is_mounted = Self::is_mounted(&self.config, mounted);
+        if self.is_mounted != old_state {
+            self.needs_mount = MountAction::None;
+        }
+    }
+
+    fn is_mounted(config: &MountConfiguration, mounted: &[MountConfiguration]) -> bool {
+        mounted
+            .iter()
+            .any(|m| &m.mount_point == &config.mount_point)
     }
 
     pub fn toggle_mount(&mut self) {
@@ -373,16 +446,26 @@ impl TableRow {
     }
 }
 
+impl Default for TableRow {
+    fn default() -> Self {
+        Self {
+            config: MountConfiguration {
+                name: Default::default(),
+                device: Default::default(),
+                is_luks_encrypted: Default::default(),
+                mount_point: Default::default(),
+                filesystem: Default::default(),
+            },
+            is_mounted: Default::default(),
+            needs_mount: Default::default(),
+        }
+    }
+}
+
 fn make_table_rows(config: &ConfigFile, mounted: &[MountConfiguration]) -> Vec<TableRow> {
     let mut rows = Vec::new();
     for config in config.iter() {
-        rows.push(TableRow {
-            config: config.clone(),
-            is_mounted: mounted
-                .iter()
-                .any(|m| &m.mount_point == &config.mount_point),
-            needs_mount: MountAction::None,
-        });
+        rows.push(TableRow::new(config.clone(), mounted));
     }
     rows
 }
@@ -395,6 +478,83 @@ pub struct TuiActions {
     pub to_mount: Vec<String>,
     /// The names of configurations that need to be unmounted
     pub to_unmount: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct KeyBindings<'a> {
+    num_rows: usize,
+    bindings: &'a [&'a str],
+    max_lengths: Vec<usize>,
+}
+
+impl<'a> KeyBindings<'a> {
+    const PADDING: u16 = 6;
+
+    fn new(bindings: &'a [&str], max_width: usize) -> Self {
+        for num_rows in 1..bindings.len() {
+            let num_columns = bindings.len().div_ceil(num_rows);
+            let padding_length = Self::PADDING as usize * (num_columns - 1);
+            let max_lengths = Self::calculate_max_lengths(bindings, num_columns);
+
+            if max_lengths.iter().sum::<usize>() + padding_length < max_width {
+                return Self {
+                    num_rows,
+                    bindings,
+                    max_lengths,
+                };
+            }
+        }
+
+        // Default to every bindings on its own row
+        Self {
+            num_rows: bindings.len(),
+            bindings,
+            max_lengths: vec![bindings.iter().map(|x| x.len()).max().unwrap_or(1)],
+        }
+    }
+
+    fn calculate_max_lengths(bindings: &[&str], num_cols: usize) -> Vec<usize> {
+        bindings
+            .chunks(num_cols)
+            .fold(vec![0; num_cols], |mut a, n| {
+                a.iter_mut()
+                    .zip(n)
+                    .for_each(|(width, binding)| *width = binding.len().max(*width));
+                a
+            })
+    }
+
+    pub fn num_rows(&self) -> u16 {
+        self.num_rows.try_into().unwrap_or(1)
+    }
+}
+
+impl<'a> Widget for KeyBindings<'a> {
+    fn render(self, area: Rect, buf: &mut ratatui::prelude::Buffer)
+    where
+        Self: Sized,
+    {
+        let columns = Layout::horizontal(
+            self.max_lengths
+                .into_iter()
+                .map(|x| Constraint::Length(x as u16)),
+        )
+        .spacing(Self::PADDING)
+        .split(area);
+
+        for (col_idx, col) in columns.iter().enumerate() {
+            let rows = col.layout_vec(&Layout::vertical(std::iter::repeat_n(
+                Constraint::Length(1),
+                self.num_rows,
+            )));
+
+            for (row_idx, row) in rows.iter().enumerate() {
+                if let Some(&b) = self.bindings.get((row_idx * columns.len()) + col_idx) {
+                    Line::from(b).style(style::help_text()).render(*row, buf);
+                }
+            }
+        }
+    }
 }
 
 /// Definitions of all the styles so that things stay consistent

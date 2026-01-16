@@ -17,13 +17,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 use super::{MountAction, RunState, TableRow, style};
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{Event, KeyCode};
 use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Constraint, Layout, Position, Rect},
-    text::{Line, Text},
+    text::Line,
     widgets::{
         Block, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
         StatefulWidget, Widget, Wrap,
@@ -85,20 +84,18 @@ impl EditSelection {
         matches!(self, Self::AcceptButton | Self::DiscardButton)
     }
 
-    pub fn up(self, is_mounted: bool) -> Self {
+    pub fn up(self) -> Self {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
             Self::IsEncrypted => Self::MountPoint,
             Self::Filesystem => Self::IsEncrypted,
-            Self::AcceptButton | Self::DiscardButton if is_mounted => Self::Name,
             Self::AcceptButton | Self::DiscardButton => Self::Filesystem,
         }
     }
 
-    pub fn down(self, is_mounted: bool) -> Self {
+    pub fn down(self) -> Self {
         match self {
-            Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
             Self::MountPoint => Self::IsEncrypted,
@@ -122,9 +119,8 @@ impl EditSelection {
         }
     }
 
-    pub fn next(self, is_mounted: bool) -> Self {
+    pub fn next(self) -> Self {
         match self {
-            Self::Name if is_mounted => Self::AcceptButton,
             Self::Name => Self::Device,
             Self::Device => Self::MountPoint,
             Self::MountPoint => Self::IsEncrypted,
@@ -134,13 +130,12 @@ impl EditSelection {
         }
     }
 
-    pub fn previous(self, is_mounted: bool) -> Self {
+    pub fn previous(self) -> Self {
         match self {
             Self::Name | Self::Device => Self::Name,
             Self::MountPoint => Self::Device,
             Self::IsEncrypted => Self::MountPoint,
             Self::Filesystem => Self::IsEncrypted,
-            Self::AcceptButton if is_mounted => Self::Name,
             Self::AcceptButton => Self::Filesystem,
             Self::DiscardButton => Self::AcceptButton,
         }
@@ -176,30 +171,29 @@ impl EditModal {
         }
     }
 
-    pub fn handle_input(&mut self) -> Result<RunState<TableRow>> {
-        let event = event::read()?;
+    pub fn handle_input(&mut self, event: Event) -> RunState<TableRow> {
         if let Event::Key(key) = event
             && key.kind.is_press()
         {
             match key.code {
-                KeyCode::Esc => return Ok(RunState::Abort),
+                KeyCode::Esc => return RunState::Abort,
                 KeyCode::Enter => match self.selected {
                     EditSelection::AcceptButton => {
-                        return Ok(RunState::Complete(self.clone().into()));
+                        return RunState::Complete(self.clone().into());
                     }
-                    EditSelection::DiscardButton => return Ok(RunState::Abort),
+                    EditSelection::DiscardButton => return RunState::Abort,
                     _ => {}
                 },
-                KeyCode::Up => self.selected = self.selected.up(self.is_mounted),
-                KeyCode::Down => self.selected = self.selected.down(self.is_mounted),
+                KeyCode::Up => self.selected = self.selected.up(),
+                KeyCode::Down => self.selected = self.selected.down(),
                 KeyCode::Left if self.selected.is_button() => {
                     self.selected = self.selected.left();
                 }
                 KeyCode::Right if self.selected.is_button() => {
                     self.selected = self.selected.right();
                 }
-                KeyCode::Tab => self.selected = self.selected.next(self.is_mounted),
-                KeyCode::BackTab => self.selected = self.selected.previous(self.is_mounted),
+                KeyCode::Tab => self.selected = self.selected.next(),
+                KeyCode::BackTab => self.selected = self.selected.previous(),
 
                 KeyCode::Char(' ') if self.selected == EditSelection::IsEncrypted => {
                     self.is_encrypted = !self.is_encrypted
@@ -216,6 +210,7 @@ impl EditModal {
                         self.mount_point.handle_event(&event);
                     }
                     EditSelection::IsEncrypted => {}
+
                     EditSelection::Filesystem => {
                         self.filesystem.handle_event(&event);
                     }
@@ -224,7 +219,7 @@ impl EditModal {
             }
         }
 
-        Ok(RunState::Running)
+        RunState::Running
     }
 
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
@@ -252,7 +247,7 @@ impl EditModal {
         macro_rules! display_field {
             ($idx:expr, $label:expr, $variant:expr, $field:ident) => {{
                 let [key_area, value_area] = field_areas[$idx].layout(&entry_layout);
-                Text::from($label)
+                Line::from($label)
                     .style(style::header_text())
                     .render(key_area, buf);
 
@@ -270,7 +265,7 @@ impl EditModal {
                     style::default_text()
                 };
 
-                Text::from(self.$field.value())
+                Line::from(self.$field.value())
                     .style(style)
                     .render(value_area, buf);
             }};
@@ -308,12 +303,12 @@ impl EditModal {
             .spacing(2),
         );
 
-        Text::from("[Accept]")
+        Line::from("[Accept]")
             .style(style::button_style(
                 self.selected == EditSelection::AcceptButton,
             ))
             .render(button_areas[0], buf);
-        Text::from("[Discard]")
+        Line::from("[Discard]")
             .style(style::button_style(
                 self.selected == EditSelection::DiscardButton,
             ))
@@ -355,20 +350,20 @@ impl ConfirmModal {
         }
     }
 
-    pub fn handle_input(&mut self) -> Result<RunState<bool>> {
-        if let Event::Key(key) = event::read()?
+    pub fn handle_input(&mut self, event: Event) -> RunState<bool> {
+        if let Event::Key(key) = event
             && key.kind.is_press()
         {
             match key.code {
-                KeyCode::Esc => return Ok(RunState::Abort),
-                KeyCode::Enter => return Ok(RunState::Complete(self.yes_selected)),
+                KeyCode::Esc => return RunState::Abort,
+                KeyCode::Enter => return RunState::Complete(self.yes_selected),
                 KeyCode::Right => self.yes_selected = false,
                 KeyCode::Left => self.yes_selected = true,
                 _ => {}
             }
         }
 
-        Ok(RunState::Running)
+        RunState::Running
     }
 
     pub fn draw(&self, area: Rect, buf: &mut Buffer) {
@@ -403,10 +398,10 @@ impl ConfirmModal {
             .spacing(2),
         );
 
-        Text::from("[Yes]")
+        Line::from("[Yes]")
             .style(style::button_style(self.yes_selected))
             .render(button_layout[0], buf);
-        Text::from("[No]")
+        Line::from("[No]")
             .style(style::button_style(!self.yes_selected))
             .render(button_layout[1], buf);
     }
@@ -431,40 +426,47 @@ impl NotifyModal {
         }
     }
 
-    pub fn handle_input(&mut self) -> Result<RunState<()>> {
-        if let Event::Key(key) = event::read()?
+    pub fn handle_input(&mut self, event: Event) -> RunState<()> {
+        if let Event::Key(key) = event
             && key.kind.is_press()
         {
             match key.code {
-                KeyCode::Esc => return Ok(RunState::Abort),
-                KeyCode::Enter => return Ok(RunState::Complete(())),
+                KeyCode::Esc => return RunState::Abort,
+                KeyCode::Enter => return RunState::Complete(()),
                 KeyCode::Up => self.scroll_state.prev(),
                 KeyCode::Down => self.scroll_state.next(),
                 _ => {}
             }
         }
 
-        Ok(RunState::Running)
+        RunState::Running
     }
 
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+        let num_lines = (self.text.lines().count() + 4) // +4 for borders, buttons, spacing
+            .try_into()
+            .unwrap_or(std::u16::MAX);
+
         let area = area.centered(
             Constraint::Length(75), // 70 character lines + padding, border, and scroll bar
-            Constraint::Percentage(50), // top and bottom border + content
+            Constraint::Length(num_lines.min(area.height / 2)), // min content size, or half the viewport
         );
 
         let border = Block::bordered()
             .padding(Padding::horizontal(1))
             .title(Line::from(format!(" {} ", self.title)).style(style::header_text()));
 
-        let field_areas: [Rect; 2] = border
-            .inner(area)
-            .layout(&Layout::default().constraints([Constraint::Fill(1), Constraint::Length(1)]));
+        let field_areas: [Rect; 2] = border.inner(area).layout(
+            &Layout::default()
+                .constraints([Constraint::Fill(1), Constraint::Length(1)])
+                .spacing(1),
+        );
 
         Clear.render(area, buf); // Clear space
         border.render(area, buf); // Draw the border of our modal
         Paragraph::new(self.text.as_str())
             .style(style::default_text())
+            .wrap(Wrap { trim: true })
             .scroll((self.scroll_state.get_position() as u16, 0))
             .render(field_areas[0], buf);
 
@@ -475,7 +477,7 @@ impl NotifyModal {
         let button_area: [Rect; 2] = field_areas[1]
             .layout(&Layout::horizontal([Constraint::Length(4), Constraint::Fill(1)]).spacing(1));
 
-        Text::from("[OK]")
+        Line::from("[OK]")
             .style(style::button_selected_text())
             .render(button_area[0], buf);
     }

@@ -265,7 +265,8 @@ impl EditModal {
                     style::default_text()
                 };
 
-                Line::from(self.$field.value())
+                Paragraph::new(self.$field.value())
+                    .scroll((0, scroll.try_into().unwrap_or_default()))
                     .style(style)
                     .render(value_area, buf);
             }};
@@ -445,7 +446,7 @@ impl NotifyModal {
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         let num_lines = (self.text.lines().count() + 4) // +4 for borders, buttons, spacing
             .try_into()
-            .unwrap_or(std::u16::MAX);
+            .unwrap_or(u16::MAX);
 
         let area = area.centered(
             Constraint::Length(75), // 70 character lines + padding, border, and scroll bar

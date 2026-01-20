@@ -406,9 +406,7 @@ impl TableRow {
     }
 
     fn is_mounted(config: &MountConfiguration, mounted: &[MountConfiguration]) -> bool {
-        mounted
-            .iter()
-            .any(|m| m.mount_point == config.mount_point)
+        mounted.iter().any(|m| m.mount_point == config.mount_point)
     }
 
     pub fn toggle_mount(&mut self) {

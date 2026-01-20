@@ -76,6 +76,7 @@ This project is made possible thanks to the generous contributions of others!
 | Dependency  | Owner / Maintainer                                    | License           |
 | ----------- | ----------------------------------------------------- | ----------------- |
 | anyhow      | David Tolnay                                          | MIT or Apache-2.0 |
+| clap        | Kevin K. / clap-rs Admins                             | MIT or Apache-2.0 |
 | crossterm   | Timon                                                 | MIT               |
 | directories | soc                                                   | MIT or Apache-2.0 |
 | ratatui 🐀  | Orhum Parmaksiz, Dheepak Krishnamurthy, Josh McKinney | MIT               |

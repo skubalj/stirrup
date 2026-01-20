@@ -16,11 +16,11 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use crate::{interface::MountTui, mount::ConfigFile};
 use anyhow::bail;
+use clap::Parser;
 use crossterm::tty::IsTty;
 use std::{fs, io::stdout, path::PathBuf};
-
-use crate::{interface::MountTui, mount::ConfigFile};
 
 mod interface;
 mod mount;
@@ -32,12 +32,34 @@ macro_rules! println_colored {
     }};
 }
 
+/// Stirrup is a filesystem mount manager with a convenient terminal user interface
+#[derive(Parser)]
+#[command(version, author)]
+#[command(after_long_help = "Copyright (C) 2026 Joseph Skubal
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.")]
+struct Args {
+    /// The path to a non-standard config file
+    #[arg(long, short)]
+    config_file: Option<PathBuf>,
+}
+
 fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
     if !stdout().is_tty() {
         bail!("stirrup must be run interactively");
     }
 
-    let config_path = config_file_path();
+    let config_path = args.config_file.unwrap_or_else(config_file_path);
     if let Some(p) = config_path.parent() {
         fs::create_dir_all(p)?;
     }

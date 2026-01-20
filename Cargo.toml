@@ -16,6 +16,7 @@ strip = true
 
 [dependencies]
 anyhow = "1.0.100"
+clap = { version = "4.5.54", features = ["derive"] }
 crossterm = "0.29.0"
 directories = "6.0.0"
 ratatui = "0.30.0"

@@ -36,7 +36,7 @@ use crate::mount::MountConfiguration;
 pub enum ModalState {
     #[default]
     None,
-    EditModal(EditModal),
+    EditModal(Box<EditModal>),
     DeleteConfirmModal(ConfirmModal),
     Notification(NotifyModal),
 }
@@ -75,6 +75,7 @@ enum EditSelection {
     MountPoint,
     IsEncrypted,
     Filesystem,
+    Options,
     AcceptButton,
     DiscardButton,
 }
@@ -90,7 +91,8 @@ impl EditSelection {
             Self::MountPoint => Self::Device,
             Self::IsEncrypted => Self::MountPoint,
             Self::Filesystem => Self::IsEncrypted,
-            Self::AcceptButton | Self::DiscardButton => Self::Filesystem,
+            Self::Options => Self::Filesystem,
+            Self::AcceptButton | Self::DiscardButton => Self::Options,
         }
     }
 
@@ -100,7 +102,8 @@ impl EditSelection {
             Self::Device => Self::MountPoint,
             Self::MountPoint => Self::IsEncrypted,
             Self::IsEncrypted => Self::Filesystem,
-            Self::Filesystem | Self::AcceptButton => Self::AcceptButton,
+            Self::Filesystem => Self::Options,
+            Self::Options | Self::AcceptButton => Self::AcceptButton,
             Self::DiscardButton => Self::DiscardButton,
         }
     }
@@ -125,7 +128,8 @@ impl EditSelection {
             Self::Device => Self::MountPoint,
             Self::MountPoint => Self::IsEncrypted,
             Self::IsEncrypted => Self::Filesystem,
-            Self::Filesystem => Self::AcceptButton,
+            Self::Filesystem => Self::Options,
+            Self::Options => Self::AcceptButton,
             Self::AcceptButton | Self::DiscardButton => Self::DiscardButton,
         }
     }
@@ -136,7 +140,8 @@ impl EditSelection {
             Self::MountPoint => Self::Device,
             Self::IsEncrypted => Self::MountPoint,
             Self::Filesystem => Self::IsEncrypted,
-            Self::AcceptButton => Self::Filesystem,
+            Self::Options => Self::Filesystem,
+            Self::AcceptButton => Self::Options,
             Self::DiscardButton => Self::AcceptButton,
         }
     }
@@ -149,6 +154,7 @@ pub struct EditModal {
     mount_point: Input,
     is_encrypted: bool,
     filesystem: Input,
+    options: Input,
 
     is_mounted: bool,
     needs_mount: MountAction,
@@ -157,18 +163,21 @@ pub struct EditModal {
 }
 
 impl EditModal {
-    pub fn new(row: &TableRow) -> Self {
-        Self {
+    const CONTENT_FIELDS: usize = 6;
+
+    pub fn new(row: &TableRow) -> Box<Self> {
+        Box::new(Self {
             name: Input::new(row.config.name.clone()),
             device: Input::new(row.config.device.clone()),
             mount_point: Input::new(row.config.mount_point.to_string_lossy().to_string()),
             is_encrypted: row.config.is_luks_encrypted,
             filesystem: Input::new(row.config.filesystem.clone().unwrap_or_default()),
+            options: Input::new(row.config.options.clone().unwrap_or_default()),
             is_mounted: row.is_mounted,
             needs_mount: row.needs_mount,
             selected: Default::default(),
             cursor: Default::default(),
-        }
+        })
     }
 
     pub fn handle_input(&mut self, event: Event) -> RunState<TableRow> {
@@ -210,9 +219,11 @@ impl EditModal {
                         self.mount_point.handle_event(&event);
                     }
                     EditSelection::IsEncrypted => {}
-
                     EditSelection::Filesystem => {
                         self.filesystem.handle_event(&event);
+                    }
+                    EditSelection::Options => {
+                        self.options.handle_event(&event);
                     }
                     EditSelection::AcceptButton | EditSelection::DiscardButton => {}
                 },
@@ -225,7 +236,7 @@ impl EditModal {
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         let area = area.centered(
             Constraint::Percentage(50),
-            Constraint::Length(9), // top and bottom border + content
+            Constraint::Length(4 + Self::CONTENT_FIELDS as u16), // top and bottom border + buttons + spacing + content
         );
 
         let border = Block::bordered()
@@ -241,7 +252,9 @@ impl EditModal {
 
         let entry_layout =
             Layout::horizontal([Constraint::Length(15), Constraint::Fill(1)]).spacing(1);
-        let field_areas: [Rect; 5] = content.layout(&Layout::vertical([Constraint::Length(1); 5]));
+        let field_areas: [Rect; Self::CONTENT_FIELDS] = content.layout(&Layout::vertical(
+            [Constraint::Length(1); Self::CONTENT_FIELDS],
+        ));
 
         self.cursor = None;
         macro_rules! display_field {
@@ -294,6 +307,7 @@ impl EditModal {
         }
 
         display_field!(4, "Filesystem:", EditSelection::Filesystem, filesystem);
+        display_field!(5, "Options:", EditSelection::Options, options);
 
         let button_areas: [Rect; 3] = buttons.layout(
             &Layout::horizontal([
@@ -329,6 +343,11 @@ impl From<EditModal> for TableRow {
                     None
                 } else {
                     Some(value.filesystem.value().into())
+                },
+                options: if value.options.value().is_empty() {
+                    None
+                } else {
+                    Some(value.options.value().into())
                 },
             },
             is_mounted: value.is_mounted,

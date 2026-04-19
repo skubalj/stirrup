@@ -71,6 +71,7 @@ pub struct MountConfiguration {
     pub is_luks_encrypted: bool,
     pub mount_point: PathBuf,
     pub filesystem: Option<String>,
+    pub options: Option<String>,
 }
 
 impl MountConfiguration {
@@ -98,6 +99,12 @@ impl MountConfiguration {
             Vec::new()
         };
 
+        let options_arg = if let Some(o) = &self.options {
+            vec!["-o", o]
+        } else {
+            Vec::new()
+        };
+
         let mount_device = if self.is_luks_encrypted {
             Path::new("/dev/mapper").join(self.cryptsetup_mapping())
         } else {
@@ -107,6 +114,7 @@ impl MountConfiguration {
         let status = Command::new("sudo")
             .arg("mount")
             .args(type_arg)
+            .args(options_arg)
             .arg(mount_device)
             .arg(&self.mount_point)
             .println()
@@ -208,7 +216,7 @@ pub fn probe_mtab() -> io::Result<Vec<MountConfiguration>> {
 
     let mut configs = Vec::new();
     for record in data.lines() {
-        let mut fields = record.split_ascii_whitespace().take(3);
+        let mut fields = record.split_ascii_whitespace().take(4);
         configs.push(MountConfiguration {
             name: String::new(),
             device: missing_data_msg(fields.next(), "no device found in mtab record")?.to_owned(),
@@ -218,6 +226,7 @@ pub fn probe_mtab() -> io::Result<Vec<MountConfiguration>> {
             filesystem: Some(
                 missing_data_msg(fields.next(), "no filesystem found in mtab record")?.to_owned(),
             ),
+            options: Some(missing_data_msg(fields.next(), "no options found")?.to_owned()),
         })
     }
 
@@ -226,4 +235,13 @@ pub fn probe_mtab() -> io::Result<Vec<MountConfiguration>> {
 
 fn missing_data_msg<'a>(data: Option<&'a str>, msg: &str) -> io::Result<&'a str> {
     data.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, msg))
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    #[ignore]
+    fn probe_mtab() {
+        println!("{:#?}", super::probe_mtab());
+    }
 }

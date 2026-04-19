@@ -312,19 +312,27 @@ GNU General Public License for more details.",
                     Cell::from(display_boolean(item.config.is_luks_encrypted)).style(row_style),
                     Cell::from(item.config.filesystem.as_deref().unwrap_or_default())
                         .style(row_style),
+                    Cell::from(item.config.options.as_deref().unwrap_or_default()).style(row_style),
                 ])
             })
             .collect();
 
-        let header = Row::from_iter([
-            Cell::from("").style(style::header_text()),
-            Cell::from("Mounted:").style(style::header_text()),
-            Cell::from("Name:").style(style::header_text()),
-            Cell::from("Device:").style(style::header_text()),
-            Cell::from("Mount Point:").style(style::header_text()),
-            Cell::from("LUKS Encrypted:").style(style::header_text()),
-            Cell::from("Filesystem:").style(style::header_text()),
-        ]);
+        let labels = [
+            "    ", // 4 digits for index
+            "Mounted: ",
+            "Name: ",
+            "Device: ",
+            "Mount Point: ",
+            "LUKS Encrypted: ",
+            "Filesystem: ",
+            "Options: ",
+        ];
+
+        let header = Row::from_iter(
+            labels
+                .iter()
+                .map(|&text| Cell::from(text).style(style::header_text())),
+        );
 
         macro_rules! find_longest {
             ($mapping_fn:expr) => {
@@ -338,13 +346,25 @@ GNU General Public License for more details.",
         }
 
         let col_constraints = [
-            Constraint::Length(4),
-            Constraint::Length(9),
-            Constraint::Fill(find_longest!(|r| r.config.name.len())),
-            Constraint::Fill(find_longest!(|r| r.config.device.len())),
-            Constraint::Fill(find_longest!(|r| r.config.mount_point.as_os_str().len())),
-            Constraint::Length(16),
-            Constraint::Length(11),
+            Constraint::Length(labels[0].len() as u16),
+            Constraint::Length(labels[1].len() as u16),
+            Constraint::Fill(find_longest!(|r| r.config.name.len()).max(labels[2].len() as u16)),
+            Constraint::Fill(find_longest!(|r| r.config.device.len()).max(labels[3].len() as u16)),
+            Constraint::Fill(
+                find_longest!(|r| r.config.mount_point.as_os_str().len())
+                    .max(labels[4].len() as u16),
+            ),
+            Constraint::Length(labels[5].len() as u16),
+            Constraint::Length(labels[6].len() as u16),
+            Constraint::Fill(
+                find_longest!(|r| r
+                    .config
+                    .options
+                    .as_ref()
+                    .map(|x| x.len())
+                    .unwrap_or_default())
+                .max(labels[7].len() as u16),
+            ),
         ];
 
         let table = Table::new(table_rows, col_constraints)
@@ -429,6 +449,11 @@ impl TableRow {
         if self.config.mount_point.as_os_str().is_empty() {
             errors.push("The 'mount_point' field cannot be empty.".into())
         }
+        if let Some(options) = &self.config.options
+            && options.chars().any(|c| c.is_whitespace())
+        {
+            errors.push("The 'options' field cannot contain whitespace.".into())
+        }
 
         errors
     }
@@ -453,6 +478,7 @@ impl Default for TableRow {
                 is_luks_encrypted: Default::default(),
                 mount_point: Default::default(),
                 filesystem: Default::default(),
+                options: Default::default(),
             },
             is_mounted: Default::default(),
             needs_mount: Default::default(),
